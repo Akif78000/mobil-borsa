@@ -90,6 +90,7 @@ if st.button("ANALİZ ET", type="primary"):
       # KODUN EN ALTINA EKLENECEK YASAL UYARI METNİ
 st.markdown("---")
 st.caption("""
-⚠️ **YASAL UYARI:** Bu uygulamada yer alan tüm bilgiler, grafikler ve al-sat sinyalleri tamamen teknik göstergeler (RSI) baz alınarak otomatik hesaplanmaktadır ve **kesinlikle yatırım danışmanlığı kapsamında değildir.** Burada yer alan yorumlar doğrultusunda yapılacak işlemler sonucunda oluşabilecek zararlardan bu yazılım ve geliştiricisi sorumlu tutulamaz.
+⚠️ **YASAL UYARI:** Bu uygulamada yer alan tüm bilgiler, grafikler ve al-sat sinyalleri tamamen teknik göstergeler (RSI) baz alınarak otomatik hesaplanmaktadır ve **kesinlikle yatırım danışmanlığı kapsamında değildir.** Burada yer alan yorumlar doğrultusunda yapılacak işlemler sonucunda oluşabilecek zararlardan bu yazılım ve geliştiricisi sorumlu tutulamaz. Güzel kızıma ithafen yapılmıştir. GRA
+
 """)
-    *Güzel kızıma ithafen yapilmistir*
+    
