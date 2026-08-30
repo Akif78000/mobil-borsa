@@ -33,6 +33,10 @@ def rsi_hesapla(fiyat_listesi):
 
 ticker = st.text_input("Varlık Kodu Girin:", value="THYAO.IS").strip().upper()
 
+col_p1, col_p2 = st.columns(2)
+islem_yuzdesi = col_p1.number_input("İşlem Yüzdesi (%)", min_value=1, max_value=100, value=33)
+portfoy_buyuklugu = col_p2.number_input("Portföy Büyüklüğü ($)", min_value=0.0, value=0.0, step=100.0)
+
 if st.button("ANALİZ ET", type="primary"):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=2mo&interval=1d"
     
@@ -66,7 +70,27 @@ if st.button("ANALİZ ET", type="primary"):
                 st.success("✅ AŞIRI SATIM BÖLGESİ! Fiyat oldukça ucuzlamış. Kademeli ALIM düşünülebilir.")
             else:
                 st.info("🔄 NÖTR BÖLGE: Fiyat dengeli bantta gidiyor. Mevcut pozisyonu koruyup bekleyin.")
-                
+
+            if guncel_rsi > 70:
+                yon = "SATIŞ"
+            elif guncel_rsi < 30:
+                yon = "ALIM"
+            else:
+                yon = None
+
+            st.subheader("🧪 Simüle Pozisyon Önerisi (gerçek emir gönderilmez)")
+            if yon is None:
+                st.write(f"Şu an nötr bölgede olduğu için {ticker} için %{islem_yuzdesi} ile bir pozisyon önerilmiyor.")
+            else:
+                islem_tutari = portfoy_buyuklugu * (islem_yuzdesi / 100)
+                st.write(f"RSI sinyaline göre **{ticker}** için portföyünüzün **%{islem_yuzdesi}**'i ile **{yon}** düşünülebilir.")
+                if portfoy_buyuklugu > 0:
+                    adet = islem_tutari / son_fiyat if son_fiyat else 0
+                    st.write(f"Örnek: ${islem_tutari:,.2f} ≈ {adet:,.4f} {ticker.split('-')[0]}")
+                else:
+                    st.caption("Adet hesaplaması için yukarıdan Portföy Büyüklüğü girin.")
+                st.caption("⚠️ Bu sadece bir simülasyondur. Borsaya bağlı değildir, gerçek bir alım-satım emri oluşturmaz; yatırım tavsiyesi değildir.")
+
             st.subheader("📅 Son 10 Günlük Trend ve Sinyaller")
             
             tablo_verisi = []
