@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 .env
 trade_bot_state.json
+backtest_trades.csv
