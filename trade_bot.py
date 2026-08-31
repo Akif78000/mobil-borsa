@@ -56,9 +56,12 @@ SYMBOL = os.environ.get("SYMBOL", "SHIBUSDT")
 BASE_ASSET = os.environ.get("BASE_ASSET", "SHIB")
 QUOTE_ASSET = os.environ.get("QUOTE_ASSET", "USDT")
 TRADE_PERCENT = float(os.environ.get("TRADE_PERCENT", "33"))
-POLL_INTERVAL_SECONDS = int(os.environ.get("POLL_INTERVAL_SECONDS", "300"))
+POLL_INTERVAL_SECONDS = int(os.environ.get("POLL_INTERVAL_SECONDS", "60"))
+KLINE_INTERVAL = os.environ.get("KLINE_INTERVAL", "15m")
 RSI_BUY_THRESHOLD = float(os.environ.get("RSI_BUY_THRESHOLD", "30"))
 RSI_SELL_THRESHOLD = float(os.environ.get("RSI_SELL_THRESHOLD", "70"))
+EMA_TREND_SHORT = int(os.environ.get("EMA_TREND_SHORT", "50"))
+EMA_TREND_LONG = int(os.environ.get("EMA_TREND_LONG", "200"))
 STATE_FILE = os.environ.get("STATE_FILE", "trade_bot_state.json")
 
 BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY", "")
@@ -126,14 +129,33 @@ def rsi_hesapla(fiyat_listesi):
     return 100 - (100 / (1 + (son_14_kazanc / son_14_kayip)))
 
 
-def get_klines(interval="1h", limit=100):
+def get_klines(interval=None, limit=300):
     data = _http(
         "GET",
         "/api/v3/klines",
-        {"symbol": SYMBOL, "interval": interval, "limit": limit},
+        {"symbol": SYMBOL, "interval": interval or KLINE_INTERVAL, "limit": limit},
         base=MAINNET_BASE,  # fiyat verisi icin her zaman mainnet (gercek piyasa)
     )
-    return [float(k[4]) for k in data]  # kapanis fiyatlari
+    return [float(k[4]) for k in data]  # kapanis fiyatlari (son eleman = olusmakta olan mum)
+
+
+def ema_hesapla(fiyat_listesi, periyot):
+    if len(fiyat_listesi) < periyot:
+        return None
+    k = 2 / (periyot + 1)
+    ema = sum(fiyat_listesi[:periyot]) / periyot
+    for fiyat in fiyat_listesi[periyot:]:
+        ema = fiyat * k + ema * (1 - k)
+    return ema
+
+
+def trend_yonu(fiyatlar):
+    """True = yukselis trendi (kisa EMA > uzun EMA), False = dususte, None = yetersiz veri."""
+    ema_kisa = ema_hesapla(fiyatlar, EMA_TREND_SHORT)
+    ema_uzun = ema_hesapla(fiyatlar, EMA_TREND_LONG)
+    if ema_kisa is None or ema_uzun is None:
+        return None
+    return ema_kisa > ema_uzun
 
 
 def get_balance(asset):
@@ -199,12 +221,24 @@ def run_once(state):
     fiyatlar = get_klines()
     fiyat = fiyatlar[-1]
     rsi = rsi_hesapla(fiyatlar)
-    zaman = time.strftime("%d/%m/%Y %H:%M")
+    yukselis_trendi = trend_yonu(fiyatlar)
+    zaman = time.strftime("%d/%m/%Y %H:%M:%S")
+    trend_etiket = "?" if yukselis_trendi is None else ("YUKARI" if yukselis_trendi else "ASAGI")
 
-    if rsi < RSI_BUY_THRESHOLD and not state["in_position"]:
+    al_sinyali = (
+        rsi < RSI_BUY_THRESHOLD
+        and yukselis_trendi is True  # sadece yukselis trendinde al (dususte "dusen bicak" alimi yok)
+        and not state["in_position"]
+    )
+    sat_sinyali = state["in_position"] and (
+        rsi > RSI_SELL_THRESHOLD  # asiri alim -> kar realizasyonu
+        or yukselis_trendi is False  # trend bozuldu -> koruyucu cikis
+    )
+
+    if al_sinyali:
         if MODE == "dry_run":
             notify(
-                f"🟢 [SIMULE] {zaman} - {SYMBOL} RSI={rsi:.1f} fiyat={fiyat} "
+                f"🟢 [SIMULE] {zaman} - {SYMBOL} RSI={rsi:.1f} trend={trend_etiket} fiyat={fiyat} "
                 f"-> bakiyenin %{TRADE_PERCENT} ile ALIM yapilirdi."
             )
             state["in_position"] = True
@@ -216,15 +250,16 @@ def run_once(state):
             else:
                 order = place_order("BUY", harcanacak, use_quote_qty=True)
                 notify(
-                    f"🟢 [{MODE.upper()}] ALIM emri gonderildi: {order}"
+                    f"🟢 [{MODE.upper()}] ALIM emri gonderildi (RSI={rsi:.1f} trend={trend_etiket}): {order}"
                 )
                 state["in_position"] = True
 
-    elif rsi > RSI_SELL_THRESHOLD and state["in_position"]:
+    elif sat_sinyali:
+        sebep = "asiri alim" if rsi > RSI_SELL_THRESHOLD else "trend bozuldu"
         if MODE == "dry_run":
             notify(
-                f"🔴 [SIMULE] {zaman} - {SYMBOL} RSI={rsi:.1f} fiyat={fiyat} "
-                f"-> pozisyonun %{TRADE_PERCENT} ile SATIS yapilirdi."
+                f"🔴 [SIMULE] {zaman} - {SYMBOL} RSI={rsi:.1f} trend={trend_etiket} fiyat={fiyat} "
+                f"-> {sebep} nedeniyle pozisyonun %{TRADE_PERCENT} ile SATIS yapilirdi."
             )
             state["in_position"] = False
         else:
@@ -235,11 +270,12 @@ def run_once(state):
             else:
                 order = place_order("SELL", satilacak, use_quote_qty=False)
                 notify(
-                    f"🔴 [{MODE.upper()}] SATIS emri gonderildi: {order}"
+                    f"🔴 [{MODE.upper()}] SATIS emri gonderildi ({sebep}, RSI={rsi:.1f} trend={trend_etiket}): {order}"
                 )
                 state["in_position"] = False
     else:
-        print(f"{zaman} - {SYMBOL} RSI={rsi:.1f} fiyat={fiyat} -> islem yok.")
+        pozisyon = "POZISYONDA" if state["in_position"] else "BEKLEMEDE"
+        print(f"{zaman} - {SYMBOL} RSI={rsi:.1f} trend={trend_etiket} fiyat={fiyat} [{pozisyon}] -> islem yok.")
 
     save_state(state)
 
