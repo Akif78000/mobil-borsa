@@ -22,6 +22,7 @@ Android telefonunda Termux üzerinden çalıştırıyor.
 | `backtest.py` | `trade_bot.py` ile **birebir aynı** sinyal mantığını geçmiş veri üzerinde bar bar oynatıp performansı ölçen araç (getiri, kazanma oranı, max drawdown, al-ve-tut karşılaştırması). |
 | `.env.example` | Tüm yapılandırılabilir ayarların şablonu. Kullanıcı bunu `.env` olarak kopyalayıp dolduruyor. `.env` asla repoya girmiyor (`.gitignore`'da). |
 | `run_termux.sh` | Android/Termux için tek komutluk başlatıcı: paketleri kurar, `.env` yoksa oluşturur, `termux-wake-lock` alır, botu başlatır. |
+| `run_windows.bat` | Windows PC için çift-tıkla başlatıcı: Python kurulu mu kontrol eder, `.env` yoksa oluşturup Not Defteri'nde açar, bot/backtest/`.env` düzenleme seçenekli bir menü sunar. |
 | `.gitignore` | `__pycache__/`, `.env`, `trade_bot_state.json`, `backtest_trades.csv` hariç tutulmuş — hiçbiri repoya girmemeli (API anahtarı/secret sızıntısı riski). |
 
 ## Strateji mantığı (trade_bot.py ve backtest.py'de ortak)
