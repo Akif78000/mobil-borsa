@@ -26,7 +26,7 @@ import time
 import urllib.parse
 import urllib.request
 
-from trade_bot import rsi_hesapla, atr_hesapla, _load_dotenv
+from trade_bot import rsi_hesapla, _load_dotenv
 
 _load_dotenv()
 
@@ -37,14 +37,17 @@ RSI_BUY_THRESHOLD = float(os.environ.get("RSI_BUY_THRESHOLD", "30"))
 RSI_SELL_THRESHOLD = float(os.environ.get("RSI_SELL_THRESHOLD", "70"))
 EMA_TREND_SHORT = int(os.environ.get("EMA_TREND_SHORT", "50"))
 EMA_TREND_LONG = int(os.environ.get("EMA_TREND_LONG", "200"))
-EMA_SLOPE_LOOKBACK = int(os.environ.get("EMA_SLOPE_LOOKBACK", "3"))
-ATR_PERIOD = int(os.environ.get("ATR_PERIOD", "14"))
-ATR_STOP_MULTIPLIER = float(os.environ.get("ATR_STOP_MULTIPLIER", "1.5"))
-ATR_TP_MULTIPLIER = float(os.environ.get("ATR_TP_MULTIPLIER", "3.0"))
-VOLUME_PERIOD = int(os.environ.get("VOLUME_PERIOD", "20"))
-VOLUME_MULTIPLIER = float(os.environ.get("VOLUME_MULTIPLIER", "1.2"))
 BACKTEST_DAYS = int(os.environ.get("BACKTEST_DAYS", "30"))
 BACKTEST_START_CAPITAL = float(os.environ.get("BACKTEST_START_CAPITAL", "1000"))
+STOP_LOSS_PERCENT = float(os.environ.get("STOP_LOSS_PERCENT", "3"))
+TAKE_PROFIT_PERCENT = float(os.environ.get("TAKE_PROFIT_PERCENT", "6"))
+TRADING_FEE_PERCENT = float(os.environ.get("TRADING_FEE_PERCENT", "0.1"))
+EMA_SLOPE_LOOKBACK = int(os.environ.get("EMA_SLOPE_LOOKBACK", "5"))
+ATR_PERIOD = int(os.environ.get("ATR_PERIOD", "14"))
+ATR_STOP_MULTIPLIER = float(os.environ.get("ATR_STOP_MULTIPLIER", "2.0"))
+ATR_TAKE_PROFIT_MULTIPLIER = float(os.environ.get("ATR_TAKE_PROFIT_MULTIPLIER", "3.0"))
+VOLUME_PERIOD = int(os.environ.get("VOLUME_PERIOD", "20"))
+VOLUME_MULTIPLIER = float(os.environ.get("VOLUME_MULTIPLIER", "1.20"))
 
 MAINNET_BASE = "https://api.binance.com"
 _CTX = ssl.create_default_context()
@@ -98,7 +101,7 @@ def compute_ema_series(fiyatlar, periyot):
 
 
 def simulate(kapanislar, yuksekler, dusukler, hacimler, zamanlar):
-    min_gerekli = max(EMA_TREND_LONG + EMA_SLOPE_LOOKBACK, ATR_PERIOD, VOLUME_PERIOD) + 15
+    min_gerekli = EMA_TREND_LONG + 15
     if len(kapanislar) < min_gerekli:
         raise SystemExit(
             f"Yetersiz veri: {len(kapanislar)} mum var, en az {min_gerekli} lazim. "
@@ -112,83 +115,69 @@ def simulate(kapanislar, yuksekler, dusukler, hacimler, zamanlar):
     coin = 0.0
     in_position = False
     giris_fiyati = None
-    stop_price = None
-    tp_price = None
+    stop_fiyati = None
+    kar_al_fiyati = None
     trades = []
     equity_egrisi = []
 
     for i in range(min_gerekli, len(kapanislar)):
         fiyat = kapanislar[i]
-        yuksek = yuksekler[i]
-        dusuk = dusukler[i]
         # rsi_hesapla sonucu sadece son 15 kapanisa bagli (fonksiyonun kendi
         # ic mantigi geregi), o yuzden kucuk bir pencere yeterli ve hizli.
         rsi = rsi_hesapla(kapanislar[max(0, i - 59): i + 1])
         ek, eu = ema_kisa_serisi[i], ema_uzun_serisi[i]
         trend_yukari = None if ek is None or eu is None else ek > eu
-
-        # Egim icin uzun EMA kullanilir (trade_bot.py ile ayni gerekce: kisa
-        # EMA dip sirasinda zaten asagi doner, uzun EMA daha yavas tepki verip
-        # ana trendin gercekten guclenip guclenmedigini gosterir).
-        eu_once = ema_uzun_serisi[i - EMA_SLOPE_LOOKBACK] if i - EMA_SLOPE_LOOKBACK >= 0 else None
-        trend_yukseliyor = None if eu is None or eu_once is None else eu > eu_once
-
-        atr_basi = max(0, i - ATR_PERIOD - 1)
-        atr = atr_hesapla(yuksekler[atr_basi : i + 1], dusukler[atr_basi : i + 1], kapanislar[atr_basi : i + 1], ATR_PERIOD)
-
-        hacim_basi = max(0, i - VOLUME_PERIOD + 1)
-        pencere_hacim = hacimler[hacim_basi : i + 1]
-        ortalama_hacim = sum(pencere_hacim) / len(pencere_hacim) if len(pencere_hacim) >= VOLUME_PERIOD else None
-        hacim_teyidi = ortalama_hacim is not None and hacimler[i] > ortalama_hacim * VOLUME_MULTIPLIER
-
+        onceki_ema = ema_kisa_serisi[i - EMA_SLOPE_LOOKBACK] if i >= EMA_SLOPE_LOOKBACK else None
+        ema_egimi_yukari = ek is not None and onceki_ema is not None and ek > onceki_ema
+        hacim_ort = sum(hacimler[i - VOLUME_PERIOD:i]) / VOLUME_PERIOD
+        hacim_onayi = hacimler[i] >= hacim_ort * VOLUME_MULTIPLIER
+        true_ranges = []
+        for j in range(i - ATR_PERIOD + 1, i + 1):
+            true_ranges.append(max(yuksekler[j] - dusukler[j],
+                                   abs(yuksekler[j] - kapanislar[j - 1]),
+                                   abs(dusukler[j] - kapanislar[j - 1])))
+        atr = sum(true_ranges) / ATR_PERIOD
         tarih = time.strftime("%Y-%m-%d %H:%M", time.localtime(zamanlar[i] / 1000))
 
-        if in_position:
-            # Stop/kar hedefi mum icinde (high/low) tetiklenmis olabilir, sadece
-            # kapanisa bakmak gec kalir - gercekci simulasyon icin high/low kontrolu.
-            stop_tetiklendi = stop_price is not None and dusuk <= stop_price
-            tp_tetiklendi = not stop_tetiklendi and tp_price is not None and yuksek >= tp_price
-            if stop_tetiklendi or tp_tetiklendi or rsi > RSI_SELL_THRESHOLD or trend_yukari is False:
-                cikis_fiyati = stop_price if stop_tetiklendi else (tp_price if tp_tetiklendi else fiyat)
-                satilacak_coin = coin * (TRADE_PERCENT / 100)
-                if satilacak_coin > 0:
-                    usdt += satilacak_coin * cikis_fiyati
-                    coin -= satilacak_coin
-                    kar_yuzde = (cikis_fiyati - giris_fiyati) / giris_fiyati * 100
-                    if stop_tetiklendi:
-                        sebep = "stop_loss"
-                    elif tp_tetiklendi:
-                        sebep = "kar_hedefi"
-                    elif rsi > RSI_SELL_THRESHOLD:
-                        sebep = "asiri_alim"
-                    else:
-                        sebep = "trend_bozuldu"
-                    trades.append(
-                        {"tip": "SAT", "tarih": tarih, "fiyat": cikis_fiyati, "kar_yuzde": kar_yuzde, "sebep": sebep}
-                    )
-                # trade_bot.py canli calisirken de sadece TRADE_PERCENT kadar satip
-                # pozisyonu "kapali" sayiyor (kismi pozisyon kaliyor) - ayni davranisi
-                # birebir yansitiyoruz ki backtest sonucu canli botla tutarli olsun.
-                in_position = False
-                stop_price = None
-                tp_price = None
-
-        elif (
-            rsi < RSI_BUY_THRESHOLD
-            and trend_yukari is True
-            and trend_yukseliyor is True
-            and hacim_teyidi
-            and atr is not None
-        ):
+        if (not in_position and rsi < RSI_BUY_THRESHOLD and trend_yukari is True
+                and ema_egimi_yukari and hacim_onayi):
             harcanacak = usdt * (TRADE_PERCENT / 100)
             if harcanacak > 0:
-                coin += harcanacak / fiyat
+                alim_ucreti = harcanacak * TRADING_FEE_PERCENT / 100
+                coin += (harcanacak - alim_ucreti) / fiyat
                 usdt -= harcanacak
                 in_position = True
                 giris_fiyati = fiyat
-                stop_price = fiyat - ATR_STOP_MULTIPLIER * atr
-                tp_price = fiyat + ATR_TP_MULTIPLIER * atr
+                stop_fiyati = fiyat - atr * ATR_STOP_MULTIPLIER
+                kar_al_fiyati = fiyat + atr * ATR_TAKE_PROFIT_MULTIPLIER
                 trades.append({"tip": "AL", "tarih": tarih, "fiyat": fiyat})
+
+        elif in_position and (
+            rsi > RSI_SELL_THRESHOLD
+            or trend_yukari is False
+            or fiyat <= stop_fiyati
+            or fiyat >= kar_al_fiyati
+        ):
+            satilacak_coin = coin
+            if satilacak_coin > 0:
+                brut_tutar = satilacak_coin * fiyat
+                usdt += brut_tutar * (1 - TRADING_FEE_PERCENT / 100)
+                coin -= satilacak_coin
+                kar_yuzde = (fiyat - giris_fiyati) / giris_fiyati * 100
+                if fiyat <= stop_fiyati:
+                    sebep = "stop_loss"
+                elif fiyat >= kar_al_fiyati:
+                    sebep = "kar_al"
+                elif rsi > RSI_SELL_THRESHOLD:
+                    sebep = "asiri_alim"
+                else:
+                    sebep = "trend_bozuldu"
+                trades.append(
+                    {"tip": "SAT", "tarih": tarih, "fiyat": fiyat, "kar_yuzde": kar_yuzde, "sebep": sebep}
+                )
+            in_position = False
+            stop_fiyati = None
+            kar_al_fiyati = None
 
         equity_egrisi.append(usdt + coin * fiyat)
 
@@ -224,7 +213,7 @@ def ozet_yazdir(trades, equity_egrisi, ilk_fiyat, son_fiyat, mum_sayisi):
     print(f"Al-ve-tut getirisi     : {al_ve_tut_getiri:+.2f}%  (karsilastirma icin)")
     print(f"Toplam islem           : {len(trades)}  ({len(satislar)} satis)")
     print(f"Karli islem orani      : %{kazanma_orani:.1f}")
-    print(f"Ortalama islem karı    : {ort_kar:+.2f}%")
+    print(f"Ortalama islem kari    : {ort_kar:+.2f}%")
     print(f"En buyuk gerileme (DD) : {max_dusus:.2f}%")
     print("=" * 56)
 

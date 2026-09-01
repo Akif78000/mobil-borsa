@@ -25,6 +25,16 @@ Botu siz kendi bilgisayarinizda / sunucunuzda / telefonunuzda (orn.
 Termux) kendi anahtarlarinizla calistirirsiniz. Bu betik surekli
 calisan bir servis olarak baskasi tarafindan sizin adiniza
 isletilmiyor.
+
+EK GUVENLIK KATMANLARI (bu surumde eklendi):
+  - Sinyaller yalnizca KAPANMIS mumlarla uretilir (son/olusmakta olan
+    mum atlanir) ve ayni mumda birden fazla emir verilmez.
+  - Binance LOT_SIZE kurallarina gore miktar asagi yuvarlanir.
+  - Gunluk gerceklesmis zarar MAX_DAILY_LOSS_PERCENT'i asarsa yeni
+    ALIM yapilmaz.
+  - EMERGENCY_STOP_FILE (varsayilan STOP_BOT) adinda bir dosya
+    olusturursaniz bot bir sonraki kontrolde durur.
+  - TRADE_PERCENT kod seviyesinde en fazla %33 ile sinirlandirilmistir.
 """
 
 import hashlib
@@ -32,10 +42,18 @@ import hmac
 import json
 import os
 import ssl
+import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from decimal import Decimal, ROUND_DOWN
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass  # bazi ortamlarda (or. yeniden yonlendirilmis stdout) reconfigure olmayabilir
+
 
 def _load_dotenv(path=".env"):
     if not os.path.exists(path):
@@ -62,13 +80,17 @@ RSI_BUY_THRESHOLD = float(os.environ.get("RSI_BUY_THRESHOLD", "30"))
 RSI_SELL_THRESHOLD = float(os.environ.get("RSI_SELL_THRESHOLD", "70"))
 EMA_TREND_SHORT = int(os.environ.get("EMA_TREND_SHORT", "50"))
 EMA_TREND_LONG = int(os.environ.get("EMA_TREND_LONG", "200"))
-EMA_SLOPE_LOOKBACK = int(os.environ.get("EMA_SLOPE_LOOKBACK", "3"))
+EMA_SLOPE_LOOKBACK = int(os.environ.get("EMA_SLOPE_LOOKBACK", "5"))
 ATR_PERIOD = int(os.environ.get("ATR_PERIOD", "14"))
-ATR_STOP_MULTIPLIER = float(os.environ.get("ATR_STOP_MULTIPLIER", "1.5"))
-ATR_TP_MULTIPLIER = float(os.environ.get("ATR_TP_MULTIPLIER", "3.0"))
+ATR_STOP_MULTIPLIER = float(os.environ.get("ATR_STOP_MULTIPLIER", "2.0"))
+ATR_TAKE_PROFIT_MULTIPLIER = float(os.environ.get("ATR_TAKE_PROFIT_MULTIPLIER", "3.0"))
 VOLUME_PERIOD = int(os.environ.get("VOLUME_PERIOD", "20"))
-VOLUME_MULTIPLIER = float(os.environ.get("VOLUME_MULTIPLIER", "1.2"))
+VOLUME_MULTIPLIER = float(os.environ.get("VOLUME_MULTIPLIER", "1.20"))
 STATE_FILE = os.environ.get("STATE_FILE", "trade_bot_state.json")
+STOP_LOSS_PERCENT = float(os.environ.get("STOP_LOSS_PERCENT", "3"))
+TAKE_PROFIT_PERCENT = float(os.environ.get("TAKE_PROFIT_PERCENT", "6"))
+MAX_DAILY_LOSS_PERCENT = float(os.environ.get("MAX_DAILY_LOSS_PERCENT", "2"))
+EMERGENCY_STOP_FILE = os.environ.get("EMERGENCY_STOP_FILE", "STOP_BOT")
 
 BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY", "")
 BINANCE_API_SECRET = os.environ.get("BINANCE_API_SECRET", "")
@@ -136,39 +158,54 @@ def rsi_hesapla(fiyat_listesi):
 
 
 def get_klines(interval=None, limit=300):
-    """Kapanis, yuksek, dusuk ve hacim listelerini dondurur (son eleman =
-    olusmakta olan mum). ATR ve hacim filtresi icin yuksek/dusuk/hacim de
-    gerekli, sadece kapanis yeterli degil."""
     data = _http(
         "GET",
         "/api/v3/klines",
         {"symbol": SYMBOL, "interval": interval or KLINE_INTERVAL, "limit": limit},
         base=MAINNET_BASE,  # fiyat verisi icin her zaman mainnet (gercek piyasa)
     )
-    kapanislar = [float(k[4]) for k in data]
-    yuksekler = [float(k[2]) for k in data]
-    dusukler = [float(k[3]) for k in data]
-    hacimler = [float(k[5]) for k in data]
-    return kapanislar, yuksekler, dusukler, hacimler
+    # Son mum henuz kapanmamistir. Sinyal uretiminde repaint/tekrar emir riskini
+    # azaltmak icin yalnizca kapanmis mumlari kullaniriz.
+    return [float(k[4]) for k in data[:-1]]
 
 
-def atr_hesapla(yuksekler, dusukler, kapanislar, periyot=14):
-    """Ortalama Gercek Aralik (Average True Range) - oynakliga gore stop/kar
-    hedefi belirlemek icin. Basit hareketli ortalama kullanir (rsi_hesapla ile
-    tutarli olsun diye Wilder yumusatmasi yerine)."""
-    if len(kapanislar) < periyot + 1:
+def get_candles(interval=None, limit=300):
+    data = _http(
+        "GET", "/api/v3/klines",
+        {"symbol": SYMBOL, "interval": interval or KLINE_INTERVAL, "limit": limit},
+        base=MAINNET_BASE,
+    )[:-1]
+    return [
+        {"open_time": int(k[0]), "open": float(k[1]), "high": float(k[2]),
+         "low": float(k[3]), "close": float(k[4]), "volume": float(k[5])}
+        for k in data
+    ]
+
+
+def atr_hesapla(candles, period=ATR_PERIOD):
+    if len(candles) < period + 1:
         return None
-    gercek_araliklar = []
-    for i in range(1, len(kapanislar)):
-        tr = max(
-            yuksekler[i] - dusukler[i],
-            abs(yuksekler[i] - kapanislar[i - 1]),
-            abs(dusukler[i] - kapanislar[i - 1]),
-        )
-        gercek_araliklar.append(tr)
-    if len(gercek_araliklar) < periyot:
-        return None
-    return sum(gercek_araliklar[-periyot:]) / periyot
+    true_ranges = []
+    for i in range(1, len(candles)):
+        c, prev = candles[i], candles[i - 1]
+        true_ranges.append(max(c["high"] - c["low"], abs(c["high"] - prev["close"]),
+                               abs(c["low"] - prev["close"])))
+    return sum(true_ranges[-period:]) / period
+
+
+def hacim_onayi(candles):
+    if len(candles) < VOLUME_PERIOD + 1:
+        return False
+    ortalama = sum(c["volume"] for c in candles[-VOLUME_PERIOD - 1:-1]) / VOLUME_PERIOD
+    return candles[-1]["volume"] >= ortalama * VOLUME_MULTIPLIER
+
+
+def ema_egimi_yukari(fiyatlar):
+    if len(fiyatlar) < EMA_TREND_SHORT + EMA_SLOPE_LOOKBACK:
+        return False
+    simdi = ema_hesapla(fiyatlar, EMA_TREND_SHORT)
+    once = ema_hesapla(fiyatlar[:-EMA_SLOPE_LOOKBACK], EMA_TREND_SHORT)
+    return simdi is not None and once is not None and simdi > once
 
 
 def ema_hesapla(fiyat_listesi, periyot):
@@ -198,28 +235,67 @@ def get_balance(asset):
     return 0.0
 
 
+def get_symbol_rules():
+    info = _http("GET", "/api/v3/exchangeInfo", {"symbol": SYMBOL}, base=MAINNET_BASE)
+    symbols = info.get("symbols", [])
+    if not symbols:
+        raise RuntimeError(f"Binance sembolu bulunamadi: {SYMBOL}")
+    filters = {f["filterType"]: f for f in symbols[0].get("filters", [])}
+    lot = filters.get("LOT_SIZE", {})
+    notional = filters.get("NOTIONAL", filters.get("MIN_NOTIONAL", {}))
+    return {
+        "step_size": lot.get("stepSize", "1"),
+        "min_qty": float(lot.get("minQty", 0)),
+        "min_notional": float(notional.get("minNotional", 0)),
+    }
+
+
+def floor_to_step(value, step):
+    value_d, step_d = Decimal(str(value)), Decimal(str(step))
+    return float((value_d / step_d).to_integral_value(rounding=ROUND_DOWN) * step_d)
+
+
 def place_order(side, quote_or_base_qty, use_quote_qty):
     params = {"symbol": SYMBOL, "side": side, "type": "MARKET"}
     if use_quote_qty:
         params["quoteOrderQty"] = f"{quote_or_base_qty:.8f}"
     else:
-        params["quantity"] = f"{quote_or_base_qty:.0f}"
+        rules = get_symbol_rules()
+        qty = floor_to_step(quote_or_base_qty, rules["step_size"])
+        if qty < rules["min_qty"]:
+            raise RuntimeError(f"Miktar LOT_SIZE altinda: {qty} < {rules['min_qty']}")
+        params["quantity"] = format(qty, ".16f").rstrip("0").rstrip(".")
     return _http("POST", "/api/v3/order", params, signed=True)
 
 
 def load_state():
-    varsayilan = {"in_position": False, "stop_price": None, "take_profit_price": None}
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE) as f:
-            kayitli = json.load(f)
-        varsayilan.update(kayitli)
-        return varsayilan
-    return varsayilan
+            return json.load(f)
+    return {"in_position": False, "entry_price": None, "position_qty": 0.0,
+            "entry_quote": 0.0, "day": time.strftime("%Y-%m-%d"),
+            "daily_realized_pnl": 0.0, "day_start_quote": None,
+            "last_candle_close": None, "stop_price": None, "take_profit_price": None}
 
 
 def save_state(state):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f)
+
+
+def normalize_state(state):
+    defaults = load_state() if not os.path.exists(STATE_FILE) else {
+        "in_position": False, "entry_price": None, "position_qty": 0.0,
+        "entry_quote": 0.0, "day": time.strftime("%Y-%m-%d"),
+        "daily_realized_pnl": 0.0, "day_start_quote": None,
+        "last_candle_close": None, "stop_price": None, "take_profit_price": None,
+    }
+    for key, value in defaults.items():
+        state.setdefault(key, value)
+    today = time.strftime("%Y-%m-%d")
+    if state["day"] != today:
+        state.update(day=today, daily_realized_pnl=0.0, day_start_quote=None)
+    return state
 
 
 def notify(text):
@@ -250,75 +326,67 @@ def check_mode_guard():
             raise SystemExit("MODE=live icin BINANCE_API_KEY / BINANCE_API_SECRET gerekli.")
     if MODE == "testnet" and not (BINANCE_API_KEY and BINANCE_API_SECRET):
         raise SystemExit("MODE=testnet icin testnet API anahtarlari gerekli.")
+    if not 0 < TRADE_PERCENT <= 33:
+        raise SystemExit("TRADE_PERCENT guvenlik nedeniyle 0-33 araliginda olmali.")
+    if STOP_LOSS_PERCENT <= 0 or TAKE_PROFIT_PERCENT <= 0 or MAX_DAILY_LOSS_PERCENT <= 0:
+        raise SystemExit("Risk yuzdeleri sifirdan buyuk olmali.")
 
 
 def run_once(state):
-    kapanislar, yuksekler, dusukler, hacimler = get_klines()
-    fiyat = kapanislar[-1]
-    rsi = rsi_hesapla(kapanislar)
-    yukselis_trendi = trend_yonu(kapanislar)
-
-    # Egim icin kisa EMA degil, UZUN EMA (200) kullanilir: kisa EMA zaten RSI
-    # dususu sirasinda asagi doner (bu tam da alinmak istenen dip), o yuzden
-    # kisa EMA'nin egimini sart kosmak RSI mantigiyla celisir. Uzun EMA cok
-    # daha yavas tepki verdigi icin kisa vadeli bir geri cekilmede bile ana
-    # trendin gercekten guclenip guclenmedigini gosterir.
-    ema_uzun_simdi = ema_hesapla(kapanislar, EMA_TREND_LONG)
-    ema_uzun_once = (
-        ema_hesapla(kapanislar[:-EMA_SLOPE_LOOKBACK], EMA_TREND_LONG)
-        if len(kapanislar) > EMA_TREND_LONG + EMA_SLOPE_LOOKBACK
-        else None
-    )
-    trend_yukseliyor = (
-        None if ema_uzun_simdi is None or ema_uzun_once is None else ema_uzun_simdi > ema_uzun_once
-    )
-
-    atr = atr_hesapla(yuksekler, dusukler, kapanislar, ATR_PERIOD)
-
-    ortalama_hacim = (
-        sum(hacimler[-VOLUME_PERIOD:]) / VOLUME_PERIOD if len(hacimler) >= VOLUME_PERIOD else None
-    )
-    guncel_hacim = hacimler[-1]
-    hacim_teyidi = ortalama_hacim is not None and guncel_hacim > ortalama_hacim * VOLUME_MULTIPLIER
-
+    normalize_state(state)
+    if os.path.exists(EMERGENCY_STOP_FILE):
+        raise SystemExit(f"Acil durdurma dosyasi bulundu: {EMERGENCY_STOP_FILE}")
+    candles = get_candles()
+    fiyatlar = [c["close"] for c in candles]
+    fiyat = fiyatlar[-1]
+    candle_key = f"{KLINE_INTERVAL}:{candles[-1]['open_time']}"
+    if state.get("last_candle_close") == candle_key:
+        print("Yeni kapanmis mum yok; bekleniyor.")
+        return
+    state["last_candle_close"] = candle_key
+    rsi = rsi_hesapla(fiyatlar)
+    yukselis_trendi = trend_yonu(fiyatlar)
+    ema_egimi = ema_egimi_yukari(fiyatlar)
+    hacim_yuksek = hacim_onayi(candles)
+    atr = atr_hesapla(candles)
     zaman = time.strftime("%d/%m/%Y %H:%M:%S")
     trend_etiket = "?" if yukselis_trendi is None else ("YUKARI" if yukselis_trendi else "ASAGI")
 
     al_sinyali = (
-        not state["in_position"]
-        and rsi < RSI_BUY_THRESHOLD
+        rsi < RSI_BUY_THRESHOLD
         and yukselis_trendi is True  # sadece yukselis trendinde al (dususte "dusen bicak" alimi yok)
-        and trend_yukseliyor is True  # EMA egimi de yukari olsun (yataylasan/donen trende girme)
-        and hacim_teyidi  # dusuk hacimli, guvenilmez hareketleri eleme
-        and atr is not None  # ATR yoksa stop/kar hedefi konulamaz, islem yapma
+        and ema_egimi
+        and hacim_yuksek
+        and not state["in_position"]
     )
-
-    stop_tetiklendi = state["in_position"] and state.get("stop_price") and fiyat <= state["stop_price"]
-    tp_tetiklendi = (
-        state["in_position"]
-        and not stop_tetiklendi
-        and state.get("take_profit_price")
-        and fiyat >= state["take_profit_price"]
+    entry_price = state.get("entry_price")
+    stop_level = state.get("stop_price") or (entry_price * (1 - STOP_LOSS_PERCENT / 100) if entry_price else None)
+    take_level = state.get("take_profit_price") or (entry_price * (1 + TAKE_PROFIT_PERCENT / 100) if entry_price else None)
+    stop_loss = bool(stop_level and fiyat <= stop_level)
+    take_profit = bool(take_level and fiyat >= take_level)
+    gunluk_limit = bool(
+        state.get("day_start_quote")
+        and state.get("daily_realized_pnl", 0) <= -state["day_start_quote"] * MAX_DAILY_LOSS_PERCENT / 100
     )
+    al_sinyali = al_sinyali and not gunluk_limit
     sat_sinyali = state["in_position"] and (
-        stop_tetiklendi
-        or tp_tetiklendi
-        or rsi > RSI_SELL_THRESHOLD  # asiri alim -> kar realizasyonu
+        rsi > RSI_SELL_THRESHOLD  # asiri alim -> kar realizasyonu
         or yukselis_trendi is False  # trend bozuldu -> koruyucu cikis
+        or stop_loss
+        or take_profit
     )
 
     if al_sinyali:
-        stop_fiyati = fiyat - ATR_STOP_MULTIPLIER * atr
-        kar_hedefi = fiyat + ATR_TP_MULTIPLIER * atr
         if MODE == "dry_run":
             notify(
                 f"🟢 [SIMULE] {zaman} - {SYMBOL} RSI={rsi:.1f} trend={trend_etiket} fiyat={fiyat} "
-                f"-> bakiyenin %{TRADE_PERCENT} ile ALIM yapilirdi. "
-                f"Stop={stop_fiyati:.8f} Hedef={kar_hedefi:.8f}"
+                f"-> bakiyenin %{TRADE_PERCENT} ile ALIM yapilirdi."
             )
             state["in_position"] = True
-            state["stop_price"] = stop_fiyati
-            state["take_profit_price"] = kar_hedefi
+            state["entry_price"] = fiyat
+            if atr:
+                state["stop_price"] = fiyat - atr * ATR_STOP_MULTIPLIER
+                state["take_profit_price"] = fiyat + atr * ATR_TAKE_PROFIT_MULTIPLIER
         else:
             bakiye = get_balance(QUOTE_ASSET)
             harcanacak = bakiye * (TRADE_PERCENT / 100)
@@ -327,18 +395,24 @@ def run_once(state):
             else:
                 order = place_order("BUY", harcanacak, use_quote_qty=True)
                 notify(
-                    f"🟢 [{MODE.upper()}] ALIM emri gonderildi (RSI={rsi:.1f} trend={trend_etiket} "
-                    f"Stop={stop_fiyati:.8f} Hedef={kar_hedefi:.8f}): {order}"
+                    f"🟢 [{MODE.upper()}] ALIM emri gonderildi (RSI={rsi:.1f} trend={trend_etiket}): {order}"
                 )
                 state["in_position"] = True
-                state["stop_price"] = stop_fiyati
-                state["take_profit_price"] = kar_hedefi
+                state["position_qty"] = float(order.get("executedQty", 0))
+                state["entry_quote"] = float(order.get("cummulativeQuoteQty", harcanacak))
+                state["entry_price"] = (
+                    state["entry_quote"] / state["position_qty"] if state["position_qty"] else fiyat
+                )
+                state["day_start_quote"] = state.get("day_start_quote") or bakiye
+                if atr:
+                    state["stop_price"] = state["entry_price"] - atr * ATR_STOP_MULTIPLIER
+                    state["take_profit_price"] = state["entry_price"] + atr * ATR_TAKE_PROFIT_MULTIPLIER
 
     elif sat_sinyali:
-        if stop_tetiklendi:
+        if stop_loss:
             sebep = "stop-loss"
-        elif tp_tetiklendi:
-            sebep = "kar hedefi"
+        elif take_profit:
+            sebep = "kar-al"
         elif rsi > RSI_SELL_THRESHOLD:
             sebep = "asiri alim"
         else:
@@ -348,9 +422,15 @@ def run_once(state):
                 f"🔴 [SIMULE] {zaman} - {SYMBOL} RSI={rsi:.1f} trend={trend_etiket} fiyat={fiyat} "
                 f"-> {sebep} nedeniyle pozisyonun %{TRADE_PERCENT} ile SATIS yapilirdi."
             )
+            state["in_position"] = False
+            state["entry_price"] = None
+            state["stop_price"] = None
+            state["take_profit_price"] = None
         else:
             bakiye = get_balance(BASE_ASSET)
-            satilacak = bakiye * (TRADE_PERCENT / 100)
+            # Giriste acilan pozisyonu tamamen kapat; hesapta onceden bulunan
+            # coinleri satma. Eski surumun kalan pozisyon/yanlis bayrak hatasini onler.
+            satilacak = min(bakiye, float(state.get("position_qty") or bakiye))
             if satilacak <= 0:
                 notify(f"⚠️ {BASE_ASSET} bakiyesi yetersiz, satis atlandi.")
             else:
@@ -358,16 +438,19 @@ def run_once(state):
                 notify(
                     f"🔴 [{MODE.upper()}] SATIS emri gonderildi ({sebep}, RSI={rsi:.1f} trend={trend_etiket}): {order}"
                 )
-        state["in_position"] = False
-        state["stop_price"] = None
-        state["take_profit_price"] = None
+                state["in_position"] = False
+                received = float(order.get("cummulativeQuoteQty", satilacak * fiyat))
+                state["daily_realized_pnl"] += received - float(state.get("entry_quote") or 0)
+                state["entry_price"] = None
+                state["position_qty"] = 0.0
+                state["entry_quote"] = 0.0
+                state["stop_price"] = None
+                state["take_profit_price"] = None
     else:
         pozisyon = "POZISYONDA" if state["in_position"] else "BEKLEMEDE"
-        hacim_etiket = "yeterli" if hacim_teyidi else "yetersiz"
-        print(
-            f"{zaman} - {SYMBOL} RSI={rsi:.1f} trend={trend_etiket} egim={'yukari' if trend_yukseliyor else 'asagi/?'} "
-            f"hacim={hacim_etiket} fiyat={fiyat} [{pozisyon}] -> islem yok."
-        )
+        print(f"{zaman} - {SYMBOL} RSI={rsi:.1f} trend={trend_etiket} "
+              f"ema_egim={'YUKARI' if ema_egimi else 'YATAY/ASAGI'} "
+              f"hacim={'ONAY' if hacim_yuksek else 'DUSUK'} fiyat={fiyat} [{pozisyon}] -> islem yok.")
 
     save_state(state)
 
@@ -378,7 +461,7 @@ def main():
         f"🤖 Trade botu basladi. MODE={MODE} SYMBOL={SYMBOL} "
         f"TRADE_PERCENT=%{TRADE_PERCENT} POLL={POLL_INTERVAL_SECONDS}s"
     )
-    state = load_state()
+    state = normalize_state(load_state())
     while True:
         try:
             run_once(state)
