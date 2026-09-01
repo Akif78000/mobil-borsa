@@ -46,6 +46,7 @@ GRID_STEP_UP_PERCENT = float(os.environ.get("GRID_STEP_UP_PERCENT", "1"))
 GRID_ORDER_PERCENT = float(os.environ.get("GRID_ORDER_PERCENT", "10"))
 GRID_MAX_OPEN_LOTS = int(os.environ.get("GRID_MAX_OPEN_LOTS", "8"))
 GRID_RESERVE_PERCENT = float(os.environ.get("GRID_RESERVE_PERCENT", "20"))
+GRID_LOT_STOP_PERCENT = float(os.environ.get("GRID_LOT_STOP_PERCENT", "15"))
 
 REGIME_LOOKBACK = int(os.environ.get("REGIME_LOOKBACK", "20"))
 REGIME_TREND_THRESHOLD = float(os.environ.get("REGIME_TREND_THRESHOLD", "0.3"))
@@ -201,8 +202,9 @@ def _adim_trend_only(p, fiyat, tarih, rsi, trend_yukari, al_sinyali, atr):
 def _adim_grid_only(p, fiyat, tarih):
     for lot in sorted(p.open_lots, key=lambda l: l["entry_price"]):
         hedef = lot["entry_price"] * (1 + GRID_STEP_UP_PERCENT / 100)
-        if fiyat >= hedef:
-            p._sat(lot, fiyat, tarih, "grid_hedef")
+        stop_seviyesi = lot["entry_price"] * (1 - GRID_LOT_STOP_PERCENT / 100)
+        if fiyat >= hedef or fiyat <= stop_seviyesi:
+            p._sat(lot, fiyat, tarih, "grid_hedef" if fiyat >= hedef else "grid_stop_loss")
             return
     rezerv = BACKTEST_START_CAPITAL * (GRID_RESERVE_PERCENT / 100)
     harcanacak = p.usdt * (GRID_ORDER_PERCENT / 100)
@@ -224,8 +226,9 @@ def _adim_hibrit(p, fiyat, tarih, rsi, trend_yukari, trend_al_sinyali, atr, reji
                 return
         else:
             hedef = lot["entry_price"] * (1 + GRID_STEP_UP_PERCENT / 100)
-            if fiyat >= hedef:
-                p._sat(lot, fiyat, tarih, "grid_hedef")
+            stop_seviyesi = lot["entry_price"] * (1 - GRID_LOT_STOP_PERCENT / 100)
+            if fiyat >= hedef or fiyat <= stop_seviyesi:
+                p._sat(lot, fiyat, tarih, "grid_hedef" if fiyat >= hedef else "grid_stop_loss")
                 return
 
     trend_lot_var = any(l["strategy"] == "trend" for l in p.open_lots)

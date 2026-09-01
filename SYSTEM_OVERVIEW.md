@@ -261,10 +261,39 @@ yakın=trend, 0'a yakın=yatay) ile piyasa rejimini ölçüp TREND rejiminde
 yapıyor. Açık pozisyonlar hangi mantıkla açıldıysa o mantıkla yönetiliyor
 (rejim ortasında değişse bile pozisyon aniden terk edilmiyor).
 `adaptive_backtest.py`, SAF-TREND/SAF-GRID/HİBRİT'i **aynı veri üzerinde
-aynı anda** çalıştırıp yan yana karşılaştırıyor. Sentetik veriyle
-doğrulandı (rejim algılama doğru çalışıyor, hibrit trend fazında saf-trend
-ile birebir aynı kararları veriyor) — **gerçek SHIBUSDT verisiyle henüz
-test edilmedi**, bir sonraki adım bu.
+aynı anda** çalıştırıp yan yana karşılaştırıyor.
+
+**Gerçek SHIBUSDT verisiyle sonuç (kullanıcı 30/90/180 gün çalıştırdı,
+`GRID_STEP=%1`):**
+
+| Dönem | SAF-TREND getiri | SAF-GRID getiri | HİBRİT getiri | SAF-TREND token | SAF-GRID token | HİBRİT token |
+|---|---|---|---|---|---|---|
+| 30g | -%0,22 | +%1,98 | +%1,81 | -%4,49 | -%2,38 | -%2,55 |
+| 90g | -%0,44 | +%8,49 | +%4,60 | -%14,19 | -%6,49 | -%9,85 |
+| 180g | +%0,23 | +%9,68 | +%11,20 | +%2,76 | +%12,45 | +%14,01 |
+
+**Sonuç ve karar:** Hibrit **tutarlı bir kazanan değil** — sadece 180
+günlük pencerede öne çıktı, 30/90 günlük (daha yakın geçmiş) pencerelerde
+SAF-GRID hem dolar getirisinde hem token adedinde hibritten daha iyi
+çıktı (hibrit'in trend bileşeni, sadece %22 zamanda devrede olup %50-54
+kazanma oranıyla genel performansı aşağı çekmiş). **SAF-GRID, test edilen
+üç pencerenin üçünde de pozitif dolar getirisi veren tek strateji** — bu
+yüzden `grid_bot.py`/`grid_backtest.py` varsayılan adımları (`GRID_STEP_
+DOWN_PERCENT`/`GRID_STEP_UP_PERCENT`) **3'ten 1'e düşürüldü** (test edilen
+en iyi değer). Hibrit bot repoda deneysel bir seçenek olarak duruyor ama
+**önerilen/varsayılan yol değil**.
+
+**Grid lot stop-loss eklendi (kullanıcı onayıyla, "nasıl uygun görürsen"):**
+Daha önce not edilen en ciddi eksik — grid lotlarının stop-loss'u olmaması,
+fiyat bir daha hedefe ulaşmazsa sermayenin süresiz kilitlenmesi riski —
+kapatıldı. `GRID_LOT_STOP_PERCENT` (varsayılan %15): bir lot bu kadar
+zarardaysa, hedefine ulaşmasını beklemeden zararına kapatılır. Hem
+`grid_bot.py`/`grid_backtest.py` hem `adaptive_bot.py`/`adaptive_backtest.py`'deki
+grid-etiketli lotlara uygulandı. **Bu sirada bir sira/oncelik hatasi da
+bulunup duzeltildi**: eskiden ayni dongude hem eski bir lotun stop/hedefi
+hem yeni bir grid alim firsati ayni anda olustugunda, kod once YENI ALIMI
+yapip stop-loss kontrolunu o dongude hic degerlendirmiyordu (test ederken
+yakalandi). Artik cikislar her zaman yeni girislerden once kontrol ediliyor.
 
 ## Bilinen sınırlamalar / dürüst notlar
 

@@ -56,11 +56,12 @@ from trade_bot import (
 
 _load_dotenv()
 
-GRID_STEP_DOWN_PERCENT = float(os.environ.get("GRID_STEP_DOWN_PERCENT", "3"))
-GRID_STEP_UP_PERCENT = float(os.environ.get("GRID_STEP_UP_PERCENT", "3"))
+GRID_STEP_DOWN_PERCENT = float(os.environ.get("GRID_STEP_DOWN_PERCENT", "1"))
+GRID_STEP_UP_PERCENT = float(os.environ.get("GRID_STEP_UP_PERCENT", "1"))
 GRID_ORDER_PERCENT = float(os.environ.get("GRID_ORDER_PERCENT", "10"))
 GRID_MAX_OPEN_LOTS = int(os.environ.get("GRID_MAX_OPEN_LOTS", "8"))
 GRID_RESERVE_PERCENT = float(os.environ.get("GRID_RESERVE_PERCENT", "20"))
+GRID_LOT_STOP_PERCENT = float(os.environ.get("GRID_LOT_STOP_PERCENT", "15"))
 TREND_ORDER_PERCENT = float(os.environ.get("TRADE_PERCENT", "33"))
 MAX_DAILY_LOSS_PERCENT = float(os.environ.get("MAX_DAILY_LOSS_PERCENT", "2"))
 ADAPTIVE_STATE_FILE = os.environ.get("ADAPTIVE_STATE_FILE", "adaptive_bot_state.json")
@@ -191,8 +192,10 @@ def run_once(state):
                 return
         else:  # grid
             hedef = lot["entry_price"] * (1 + GRID_STEP_UP_PERCENT / 100)
-            if fiyat >= hedef:
-                _lot_sat(state, lot, fiyat, "grid hedefi", zaman)
+            stop_seviyesi = lot["entry_price"] * (1 - GRID_LOT_STOP_PERCENT / 100)
+            if fiyat >= hedef or fiyat <= stop_seviyesi:
+                sebep = "grid hedefi" if fiyat >= hedef else "grid stop-loss"
+                _lot_sat(state, lot, fiyat, sebep, zaman)
                 save_state(state)
                 return
 

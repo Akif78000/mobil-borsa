@@ -47,11 +47,15 @@ from trade_bot import (
 
 _load_dotenv()
 
-GRID_STEP_DOWN_PERCENT = float(os.environ.get("GRID_STEP_DOWN_PERCENT", "3"))
-GRID_STEP_UP_PERCENT = float(os.environ.get("GRID_STEP_UP_PERCENT", "3"))
+GRID_STEP_DOWN_PERCENT = float(os.environ.get("GRID_STEP_DOWN_PERCENT", "1"))
+GRID_STEP_UP_PERCENT = float(os.environ.get("GRID_STEP_UP_PERCENT", "1"))
 GRID_ORDER_PERCENT = float(os.environ.get("GRID_ORDER_PERCENT", "10"))
 GRID_MAX_OPEN_LOTS = int(os.environ.get("GRID_MAX_OPEN_LOTS", "8"))
 GRID_RESERVE_PERCENT = float(os.environ.get("GRID_RESERVE_PERCENT", "20"))
+# Bir lot hic hedefine ulasmadan fiyat bu kadar duserse, sonsuza kadar acik
+# kalmasin diye zararina kapatilir (once "kayip sermaye kilitlenmesin" riskine
+# karsi - grid'in kendi basina hicbir zaman sahip olmadigi tek koruma).
+GRID_LOT_STOP_PERCENT = float(os.environ.get("GRID_LOT_STOP_PERCENT", "15"))
 GRID_POLL_INTERVAL_SECONDS = int(os.environ.get("GRID_POLL_INTERVAL_SECONDS", "30"))
 MAX_DAILY_LOSS_PERCENT = float(os.environ.get("MAX_DAILY_LOSS_PERCENT", "2"))
 GRID_STATE_FILE = os.environ.get("GRID_STATE_FILE", "grid_bot_state.json")
@@ -140,6 +144,45 @@ def run_once(state):
     )
     al_tetik = fiyat <= state["last_reference_price"] * (1 - GRID_STEP_DOWN_PERCENT / 100)
 
+    # Cikislar (kar hedefi / stop-loss) her zaman YENI alimdan ONCE kontrol
+    # edilir - koruyucu bir satis, yeni bir pozisyon acmaktan daha oncelikli
+    # olmali (aksi halde fiyat hem eski bir lotun stop'unu hem yeni bir grid
+    # adimini ayni anda tetiklerse, bot yanlislikla once alim yapip stop-loss'u
+    # o dongude hic degerlendirmeyebilir).
+    for lot in sorted(state["open_lots"], key=lambda l: l["entry_price"]):
+        hedef = lot["entry_price"] * (1 + GRID_STEP_UP_PERCENT / 100)
+        stop_seviyesi = lot["entry_price"] * (1 - GRID_LOT_STOP_PERCENT / 100)
+        kar_hedefi_tetiklendi = fiyat >= hedef
+        stop_tetiklendi = fiyat <= stop_seviyesi
+        if not (kar_hedefi_tetiklendi or stop_tetiklendi):
+            continue
+        sebep = "kar hedefi" if kar_hedefi_tetiklendi else "stop-loss"
+        if MODE == "dry_run":
+            notify(
+                f"🔴 [SIMULE] {zaman} - {SYMBOL} fiyat={fiyat} giris={lot['entry_price']:.10f} "
+                f"-> GRID SATIS ({sebep})"
+            )
+            state["open_lots"].remove(lot)
+            state["last_reference_price"] = fiyat
+        else:
+            bakiye = get_balance(BASE_ASSET)
+            satilacak = min(bakiye, lot["qty"] or bakiye)
+            if satilacak <= 0:
+                notify(f"⚠️ {BASE_ASSET} bakiyesi yetersiz, grid satisi atlandi.")
+            else:
+                order = place_order("SELL", satilacak, use_quote_qty=False)
+                alinan = float(order.get("cummulativeQuoteQty", satilacak * fiyat))
+                kar = alinan - (lot.get("quote_spent") or 0)
+                state["daily_realized_pnl"] += kar
+                notify(
+                    f"🔴 [{MODE.upper()}] GRID SATIS ({sebep}, giris={lot['entry_price']:.10f} "
+                    f"fiyat={fiyat} kar={kar:+.4f} {QUOTE_ASSET}): {order}"
+                )
+                state["open_lots"].remove(lot)
+                state["last_reference_price"] = fiyat
+        save_state(state)
+        return  # tek dongude en fazla bir islem - basit ve ongorulebilir tutmak icin
+
     if al_tetik and acik_lot_sayisi < GRID_MAX_OPEN_LOTS and not gunluk_limit:
         if MODE == "dry_run":
             notify(
@@ -182,37 +225,6 @@ def run_once(state):
                     state["day_start_equity"] = bakiye
             save_state(state)
             return
-
-    # En dusuk giris fiyatli acik lot once kontrol edilir (herhangi biri hedefine ulastiysa satilir).
-    for lot in sorted(state["open_lots"], key=lambda l: l["entry_price"]):
-        hedef = lot["entry_price"] * (1 + GRID_STEP_UP_PERCENT / 100)
-        if fiyat < hedef:
-            continue
-        if MODE == "dry_run":
-            notify(
-                f"🔴 [SIMULE] {zaman} - {SYMBOL} fiyat={fiyat} giris={lot['entry_price']:.10f} "
-                f"-> GRID SATIS (kar hedefi)"
-            )
-            state["open_lots"].remove(lot)
-            state["last_reference_price"] = fiyat
-        else:
-            bakiye = get_balance(BASE_ASSET)
-            satilacak = min(bakiye, lot["qty"] or bakiye)
-            if satilacak <= 0:
-                notify(f"⚠️ {BASE_ASSET} bakiyesi yetersiz, grid satisi atlandi.")
-            else:
-                order = place_order("SELL", satilacak, use_quote_qty=False)
-                alinan = float(order.get("cummulativeQuoteQty", satilacak * fiyat))
-                kar = alinan - (lot.get("quote_spent") or 0)
-                state["daily_realized_pnl"] += kar
-                notify(
-                    f"🔴 [{MODE.upper()}] GRID SATIS (giris={lot['entry_price']:.10f} "
-                    f"fiyat={fiyat} kar={kar:+.4f} {QUOTE_ASSET}): {order}"
-                )
-                state["open_lots"].remove(lot)
-                state["last_reference_price"] = fiyat
-        save_state(state)
-        return  # tek dongude en fazla bir islem - basit ve ongorulebilir tutmak icin
 
     print(
         f"{zaman} - {SYMBOL} fiyat={fiyat} referans={state['last_reference_price']:.10f} "

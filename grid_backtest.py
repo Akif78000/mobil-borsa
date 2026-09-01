@@ -28,11 +28,12 @@ SYMBOL = os.environ.get("SYMBOL", "SHIBUSDT")
 GRID_KLINE_INTERVAL = os.environ.get("GRID_KLINE_INTERVAL", "5m")
 BACKTEST_DAYS = int(os.environ.get("BACKTEST_DAYS", "30"))
 BACKTEST_START_CAPITAL = float(os.environ.get("BACKTEST_START_CAPITAL", "1000"))
-GRID_STEP_DOWN_PERCENT = float(os.environ.get("GRID_STEP_DOWN_PERCENT", "3"))
-GRID_STEP_UP_PERCENT = float(os.environ.get("GRID_STEP_UP_PERCENT", "3"))
+GRID_STEP_DOWN_PERCENT = float(os.environ.get("GRID_STEP_DOWN_PERCENT", "1"))
+GRID_STEP_UP_PERCENT = float(os.environ.get("GRID_STEP_UP_PERCENT", "1"))
 GRID_ORDER_PERCENT = float(os.environ.get("GRID_ORDER_PERCENT", "10"))
 GRID_MAX_OPEN_LOTS = int(os.environ.get("GRID_MAX_OPEN_LOTS", "8"))
 GRID_RESERVE_PERCENT = float(os.environ.get("GRID_RESERVE_PERCENT", "20"))
+GRID_LOT_STOP_PERCENT = float(os.environ.get("GRID_LOT_STOP_PERCENT", "15"))
 TRADING_FEE_PERCENT = float(os.environ.get("TRADING_FEE_PERCENT", "0.1"))
 START_IN_SHIB = os.environ.get("START_IN_SHIB", "false").lower() in ("1", "true", "evet")
 
@@ -64,7 +65,30 @@ def simulate(kapanislar, zamanlar):
 
         al_tetik = fiyat <= referans_fiyat * (1 - GRID_STEP_DOWN_PERCENT / 100)
         harcanacak = usdt * (GRID_ORDER_PERCENT / 100)
-        if al_tetik and len(open_lots) < GRID_MAX_OPEN_LOTS and harcanacak > 0 and (usdt - harcanacak) >= rezerv:
+
+        # Cikislar (kar hedefi/stop-loss) her zaman yeni alimdan ONCE kontrol
+        # edilir - koruyucu satis, yeni pozisyon acmaktan daha oncelikli olmali.
+        satis_yapildi = False
+        for lot in sorted(open_lots, key=lambda l: l["entry_price"]):
+            hedef = lot["entry_price"] * (1 + GRID_STEP_UP_PERCENT / 100)
+            stop_seviyesi = lot["entry_price"] * (1 - GRID_LOT_STOP_PERCENT / 100)
+            if fiyat >= hedef or fiyat <= stop_seviyesi:
+                brut = lot["qty"] * fiyat
+                net = brut * (1 - TRADING_FEE_PERCENT / 100)
+                usdt += net
+                coin -= lot["qty"]
+                kar_yuzde = (fiyat - lot["entry_price"]) / lot["entry_price"] * 100
+                sebep = "grid_hedef" if fiyat >= hedef else "stop_loss"
+                trades.append({
+                    "tip": "SAT", "tarih": tarih, "fiyat": fiyat,
+                    "kar_yuzde": kar_yuzde, "sebep": sebep,
+                })
+                open_lots.remove(lot)
+                referans_fiyat = fiyat
+                satis_yapildi = True
+                break  # bu adimda en fazla bir islem, backtest.py ile ayni sadelik ilkesi
+
+        if not satis_yapildi and al_tetik and len(open_lots) < GRID_MAX_OPEN_LOTS and harcanacak > 0 and (usdt - harcanacak) >= rezerv:
             alim_ucreti = harcanacak * TRADING_FEE_PERCENT / 100
             qty = (harcanacak - alim_ucreti) / fiyat
             usdt -= harcanacak
@@ -72,22 +96,6 @@ def simulate(kapanislar, zamanlar):
             open_lots.append({"qty": qty, "entry_price": fiyat, "quote_spent": harcanacak})
             referans_fiyat = fiyat
             trades.append({"tip": "AL", "tarih": tarih, "fiyat": fiyat, "lot_sayisi": len(open_lots)})
-        else:
-            for lot in sorted(open_lots, key=lambda l: l["entry_price"]):
-                hedef = lot["entry_price"] * (1 + GRID_STEP_UP_PERCENT / 100)
-                if fiyat >= hedef:
-                    brut = lot["qty"] * fiyat
-                    net = brut * (1 - TRADING_FEE_PERCENT / 100)
-                    usdt += net
-                    coin -= lot["qty"]
-                    kar_yuzde = (fiyat - lot["entry_price"]) / lot["entry_price"] * 100
-                    trades.append({
-                        "tip": "SAT", "tarih": tarih, "fiyat": fiyat,
-                        "kar_yuzde": kar_yuzde, "sebep": "grid_hedef",
-                    })
-                    open_lots.remove(lot)
-                    referans_fiyat = fiyat
-                    break  # bu adimda en fazla bir islem, backtest.py ile ayni sadelik ilkesi
 
         equity_egrisi.append(usdt + coin * fiyat)
         coin_egrisi.append(coin + usdt / fiyat)
