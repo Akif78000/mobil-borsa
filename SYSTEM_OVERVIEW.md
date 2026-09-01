@@ -24,7 +24,9 @@ Android telefonunda Termux üzerinden çalıştırıyor.
 | `run_termux.sh` | Android/Termux için tek komutluk başlatıcı: paketleri kurar, `.env` yoksa oluşturur, `termux-wake-lock` alır, botu başlatır. |
 | `run_windows.bat` | Windows PC için çift-tıkla başlatıcı: Python kurulu mu kontrol eder, `.env` yoksa oluşturup Not Defteri'nde açar, bot/backtest/`.env` düzenleme seçenekli bir menü sunar. |
 | `AUDIT_REPORT.md` | Kullanıcının bağımsız bir AI aracıyla (Codex) yaptırdığı güvenlik/mantık denetiminin özeti — hangi düzeltmeler yapıldı, hangi backtest sonucu alındı. |
-| `.gitignore` | `__pycache__/`, `.env`, `trade_bot_state.json`, `backtest_trades.csv`, `STOP_BOT` hariç tutulmuş — hiçbiri repoya girmemeli (API anahtarı/secret sızıntısı veya çalışma zamanı dosyası). |
+| `grid_bot.py` | **Farklı strateji**: RSI/trend'e bakmayan salınım (grid) botu. Referans fiyattan %X düşünce AL, o lot'un giriş fiyatından %Y yükselince o lot'u SAT. Amaç dolar değil, **token adedi** biriktirmek. `trade_bot.py`'den mod sistemi/acil durdurma/sipariş altyapısını import ederek kullanır. |
+| `grid_backtest.py` | `grid_bot.py` ile aynı grid mantığını geçmiş veride test eder, "TOKEN ADEDİ DEĞİŞİMİ" metriğini raporlar. |
+| `.gitignore` | `__pycache__/`, `.env`, `trade_bot_state.json`, `backtest_trades.csv`, `grid_bot_state.json`, `grid_backtest_trades.csv`, `STOP_BOT` hariç tutulmuş — hiçbiri repoya girmemeli (API anahtarı/secret sızıntısı veya çalışma zamanı dosyası). |
 
 ## Strateji mantığı (trade_bot.py ve backtest.py'de ortak)
 
@@ -193,6 +195,42 @@ SHIBUSDT 15dk, son 30 gün, 26 işlem, strateji **-%0,60**, al-tut **+%1,60** �
 oranı + düşük varyans önemli, tek seferlik büyük getiri değil. Backtest
 değerlendirirken toplam getiriye ek olarak **kazanma oranına** ve **işlem
 başına ortalama kâra** bakılmalı.
+
+**4. iterasyon:** Kullanıcı hedefini netleştirdi — kayıp telafisi değil
+(3 yıldır SHIB tutuyor, $15k'dan $2k'ya düşmüş ama uzun vadeli tutmaya
+devam edecek), **dolar değil TOKEN ADEDİ** artırmak istiyor. Bunun üzerine:
+
+1. `backtest.py`'ye `START_IN_SHIB=true` modu eklendi (USDT yerine SHIB ile
+   başlar, "token adedi değişimi" raporlar). **Gerçek SHIBUSDT 30 günlük
+   veriyle test edildi: token adedi %4,67 AZALDI** (RSI+EMA trend botu,
+   token biriktirme hedefi için uygun değil — sattıktan sonra fiyat
+   beklenen geri çekilmeyi yapmadan yükselirse, geri alım daha yüksek
+   fiyattan oluyor, dolar kârı olsa bile token kaybı).
+2. Bunun üzerine **tamamen farklı bir strateji tipi** eklendi:
+   `grid_bot.py` + `grid_backtest.py` — RSI/trend'e hiç bakmayan, sadece
+   referans fiyattan %X düşünce AL / o lot'un girişinden %Y yükselince SAT
+   mantığıyla çalışan salınım (grid) botu. `trade_bot.py`'nin mod
+   sistemini, acil durdurmasını, sipariş/LOT_SIZE altyapısını import ederek
+   kullanır (kod tekrarı yok).
+
+**Grid stratejisinin doğrulanmış davranışı (sentetik veriyle test edildi,
+gerçek veriyle henüz değil):**
+- Doğru çalıştığı doğrulandı: **gerçekten net-sıfır-trendli (net trendsiz,
+  başladığı fiyata dönen) bir piyasada token adedini artırıyor**
+  (test: +%2,80, matematiksel olarak beklenen değerle birebir örtüşüyor).
+- **Önemli/genel matematiksel bulgu:** Fiyatta herhangi bir kalıcı net
+  yön (yukarı VEYA aşağı) varsa, "token-eşdeğeri-şu anki fiyattan" metriği
+  düşer — bu grid'e özgü bir kusur değil, **her "yüksekten sat, düşükten
+  al" yaklaşımının doğasında var**: satıştan sonra nakitte beklerken fiyat
+  yükselmeye devam ederse, geri alım daha yüksek fiyattan olur. Sentetik
+  güçlü-yükseliş-trendinde test edildiğinde token adedi düştü (-%71, -%15
+  gibi aşırı senaryolar dahil — bunlar uç örnekler, gerçekçi değil ama
+  mekanizmayı göstermek için kullanıldı).
+- **Sonuç:** Grid botu, SHIB gerçekten yatay/dalgalı seyrederse işe
+  yarayabilir; güçlü tek yönlü bir trend varsa (yukarı da olsa) basit
+  tutmaktan token cinsinden geride kalır. **Gerçek SHIBUSDT verisiyle
+  (`grid_backtest.py`, `START_IN_SHIB=true`) henüz test edilmedi** — bir
+  sonraki adım bu.
 
 ## Bilinen sınırlamalar / dürüst notlar
 

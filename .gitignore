@@ -3,4 +3,6 @@ __pycache__/
 .env
 trade_bot_state.json
 backtest_trades.csv
+grid_bot_state.json
+grid_backtest_trades.csv
 STOP_BOT
