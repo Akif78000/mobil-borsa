@@ -55,7 +55,7 @@ GRID_RESERVE_PERCENT = float(os.environ.get("GRID_RESERVE_PERCENT", "20"))
 # Bir lot hic hedefine ulasmadan fiyat bu kadar duserse, sonsuza kadar acik
 # kalmasin diye zararina kapatilir (once "kayip sermaye kilitlenmesin" riskine
 # karsi - grid'in kendi basina hicbir zaman sahip olmadigi tek koruma).
-GRID_LOT_STOP_PERCENT = float(os.environ.get("GRID_LOT_STOP_PERCENT", "15"))
+GRID_LOT_STOP_PERCENT = float(os.environ.get("GRID_LOT_STOP_PERCENT", "10"))
 GRID_POLL_INTERVAL_SECONDS = int(os.environ.get("GRID_POLL_INTERVAL_SECONDS", "30"))
 MAX_DAILY_LOSS_PERCENT = float(os.environ.get("MAX_DAILY_LOSS_PERCENT", "2"))
 GRID_STATE_FILE = os.environ.get("GRID_STATE_FILE", "grid_bot_state.json")

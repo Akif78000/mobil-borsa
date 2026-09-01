@@ -286,14 +286,32 @@ en iyi değer). Hibrit bot repoda deneysel bir seçenek olarak duruyor ama
 **Grid lot stop-loss eklendi (kullanıcı onayıyla, "nasıl uygun görürsen"):**
 Daha önce not edilen en ciddi eksik — grid lotlarının stop-loss'u olmaması,
 fiyat bir daha hedefe ulaşmazsa sermayenin süresiz kilitlenmesi riski —
-kapatıldı. `GRID_LOT_STOP_PERCENT` (varsayılan %15): bir lot bu kadar
-zarardaysa, hedefine ulaşmasını beklemeden zararına kapatılır. Hem
-`grid_bot.py`/`grid_backtest.py` hem `adaptive_bot.py`/`adaptive_backtest.py`'deki
-grid-etiketli lotlara uygulandı. **Bu sirada bir sira/oncelik hatasi da
-bulunup duzeltildi**: eskiden ayni dongude hem eski bir lotun stop/hedefi
-hem yeni bir grid alim firsati ayni anda olustugunda, kod once YENI ALIMI
-yapip stop-loss kontrolunu o dongude hic degerlendirmiyordu (test ederken
-yakalandi). Artik cikislar her zaman yeni girislerden once kontrol ediliyor.
+kapatıldı. `GRID_LOT_STOP_PERCENT`: bir lot bu kadar zarardaysa, hedefine
+ulaşmasını beklemeden zararına kapatılır. Hem `grid_bot.py`/`grid_backtest.py`
+hem `adaptive_bot.py`/`adaptive_backtest.py`'deki grid-etiketli lotlara
+uygulandı. **Bu sırada bir sıra/öncelik hatası da bulunup düzeltildi**:
+eskiden aynı döngüde hem eski bir lotun stop/hedefi hem yeni bir grid alım
+fırsatı aynı anda oluştuğunda, kod önce YENİ ALIMI yapıp stop-loss
+kontrolünü o döngüde hiç değerlendirmiyordu (test ederken yakalandı). Artık
+çıkışlar her zaman yeni girişlerden önce kontrol ediliyor.
+
+**Stop-loss seviyesi seçimi (kullanıcı gerçek SHIBUSDT verisiyle test etti):**
+90 günlük pencerede %5/%8/%10/%15 denendi — sonuç düzensiz/monotonik
+olmayan çıktı (%8, %10'dan VE %15'ten daha iyi), bu da tek pencerede "en
+iyi" değeri aramanın gürültüye uydurma riski taşıdığının işareti. Daha
+önemlisi: **test edilen HER stop-loss değeri, test edilen HER dönemde
+(30/90/180 gün) "stop yok" durumundan daha kötü çıktı** — çünkü bu geçmiş
+pencerede SHIB'in düşüşleri hep toparlanmış, stop bu toparlanmaların bir
+kısmını kaçırmış. Bu, stop-loss'un faydasız olduğu anlamına gelmiyor;
+backtest'in yalnızca "toparlandı" senaryolarını örneklediği, kullanıcının
+gerçekte yaşadığı "hiç toparlanmadı" senaryosunu (3 yılda %87 düşüş)
+göstermediği anlamına geliyor — böyle bir senaryoda stop olmadan her lot
+teorik olarak sınırsız zarara açık kalır. **Karar: `GRID_LOT_STOP_PERCENT=10`**
+(test edilen değerler arasında 3 dönemin 2'sinde pozitif kalan, en tutarlısı)
+kalıcı varsayılan yapıldı; daha fazla ince ayar yapılmadı (aşırı uydurma
+riskini artırmamak için). Bu bilinçli bir "beklenen getiriden biraz feragat
+edip tail-risk sigortası satın alma" kararıdır, optimize edilmiş bir sayı
+değildir.
 
 ## Bilinen sınırlamalar / dürüst notlar
 
