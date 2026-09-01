@@ -26,7 +26,9 @@ Android telefonunda Termux üzerinden çalıştırıyor.
 | `AUDIT_REPORT.md` | Kullanıcının bağımsız bir AI aracıyla (Codex) yaptırdığı güvenlik/mantık denetiminin özeti — hangi düzeltmeler yapıldı, hangi backtest sonucu alındı. |
 | `grid_bot.py` | **Farklı strateji**: RSI/trend'e bakmayan salınım (grid) botu. Referans fiyattan %X düşünce AL, o lot'un giriş fiyatından %Y yükselince o lot'u SAT. Amaç dolar değil, **token adedi** biriktirmek. `trade_bot.py`'den mod sistemi/acil durdurma/sipariş altyapısını import ederek kullanır. |
 | `grid_backtest.py` | `grid_bot.py` ile aynı grid mantığını geçmiş veride test eder, "TOKEN ADEDİ DEĞİŞİMİ" metriğini raporlar. |
-| `.gitignore` | `__pycache__/`, `.env`, `trade_bot_state.json`, `backtest_trades.csv`, `grid_bot_state.json`, `grid_backtest_trades.csv`, `STOP_BOT` hariç tutulmuş — hiçbiri repoya girmemeli (API anahtarı/secret sızıntısı veya çalışma zamanı dosyası). |
+| `adaptive_bot.py` | **Hibrit bot**: Kaufman Verimlilik Oranı ile piyasanın TREND mi RANGE mi olduğuna kendisi karar verip `trade_bot.py` (TREND) veya `grid_bot.py` (RANGE) mantığıyla giriş yapar. Açık pozisyonlar hangi mantıkla açıldıysa o mantıkla kapanır. `trade_bot.py`'den tüm ortak altyapıyı (mod sistemi, sipariş, acil durdurma) import eder. |
+| `adaptive_backtest.py` | SAF-TREND / SAF-GRID / HİBRİT üç stratejiyi **aynı** geçmiş veri üzerinde aynı anda çalıştırıp yan yana karşılaştırır — "hangisi tutarlı" sorusuna somut cevap verir. |
+| `.gitignore` | `__pycache__/`, `.env`, `*_state.json`, `*_trades.csv`, `STOP_BOT` hariç tutulmuş — hiçbiri repoya girmemeli (API anahtarı/secret sızıntısı veya çalışma zamanı dosyası). |
 
 ## Strateji mantığı (trade_bot.py ve backtest.py'de ortak)
 
@@ -228,9 +230,41 @@ gerçek veriyle henüz değil):**
   mekanizmayı göstermek için kullanıldı).
 - **Sonuç:** Grid botu, SHIB gerçekten yatay/dalgalı seyrederse işe
   yarayabilir; güçlü tek yönlü bir trend varsa (yukarı da olsa) basit
-  tutmaktan token cinsinden geride kalır. **Gerçek SHIBUSDT verisiyle
-  (`grid_backtest.py`, `START_IN_SHIB=true`) henüz test edilmedi** — bir
-  sonraki adım bu.
+  tutmaktan token cinsinden geride kalır.
+
+**Gerçek SHIBUSDT verisiyle grid testi (kullanıcı çalıştırdı):**
+- İlk denemede (`GRID_STEP=%3`, 30 gün) **0 işlem** çıktı — gerçek bir bug
+  bulundu: `START_IN_SHIB=true` modunda başlangıç SHIB'i satılabilir bir
+  "lot" olarak kaydedilmiyordu, bu yüzden bot hiç satış yapamıyor, dolayısıyla
+  hiç USDT'si olmuyor, dolayısıyla hiç alım da yapamıyordu — tamamen
+  hareketsiz kalıyordu. **Düzeltildi**: başlangıç pozisyonu artık normal bir
+  lot gibi kaydediliyor.
+- Düzeltme sonrası, adım daraltıldıkça (%3→%1,5→%1) hem işlem sayısı arttı
+  hem token kaybı küçüldü: 30 gün %1 adımla **-%1,22**, ama **90 günde
+  +%12,55, 180 günde +%16,91** — token adedi gerçekten artmış. Trend botunun
+  aynı 30 günlük sonucundan (-%4,67) çok daha iyi.
+- **Önemli çekince:** "%100 kazanma oranı" yanıltıcı olabilir — grid'in
+  doğası geregi kayıp bir lot hiç satılmıyor, açık kalıyor (180 günlük
+  testte 7 açık lot vardı). Token hesabı bunları o anki fiyattan dahil
+  ediyor (dürüst), ama gerçek risk şu: **grid lotlarında stop-loss yok**,
+  fiyat bir daha o lotun +%1 hedefine hiç ulaşmazsa sermaye süresiz
+  kilitli kalır. Kullanıcının SHIB'te yaşadığı büyük düşüş geçmişi
+  düşünülürse bu ciddi bir risk.
+
+**5. iterasyon:** Kullanıcı "hangisi tutarlı, bot kendini rejime göre mi
+yenilesin" diye sordu — bunun üzerine **hibrit (rejim-uyarlamalı) bot**
+eklendi: `adaptive_bot.py` + `adaptive_backtest.py`. Kaufman Verimlilik
+Oranı (`verimlilik_orani()`, `trade_bot.py`'ye eklendi — son
+`REGIME_LOOKBACK` mumda net hareket/toplam zigzag oranı, 0-1 arası, 1'e
+yakın=trend, 0'a yakın=yatay) ile piyasa rejimini ölçüp TREND rejiminde
+`trade_bot.py` mantığıyla, RANGE rejiminde `grid_bot.py` mantığıyla giriş
+yapıyor. Açık pozisyonlar hangi mantıkla açıldıysa o mantıkla yönetiliyor
+(rejim ortasında değişse bile pozisyon aniden terk edilmiyor).
+`adaptive_backtest.py`, SAF-TREND/SAF-GRID/HİBRİT'i **aynı veri üzerinde
+aynı anda** çalıştırıp yan yana karşılaştırıyor. Sentetik veriyle
+doğrulandı (rejim algılama doğru çalışıyor, hibrit trend fazında saf-trend
+ile birebir aynı kararları veriyor) — **gerçek SHIBUSDT verisiyle henüz
+test edilmedi**, bir sonraki adım bu.
 
 ## Bilinen sınırlamalar / dürüst notlar
 

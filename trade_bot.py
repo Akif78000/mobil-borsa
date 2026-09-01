@@ -86,6 +86,8 @@ ATR_STOP_MULTIPLIER = float(os.environ.get("ATR_STOP_MULTIPLIER", "2.0"))
 ATR_TAKE_PROFIT_MULTIPLIER = float(os.environ.get("ATR_TAKE_PROFIT_MULTIPLIER", "3.0"))
 VOLUME_PERIOD = int(os.environ.get("VOLUME_PERIOD", "20"))
 VOLUME_MULTIPLIER = float(os.environ.get("VOLUME_MULTIPLIER", "1.20"))
+REGIME_LOOKBACK = int(os.environ.get("REGIME_LOOKBACK", "20"))
+REGIME_TREND_THRESHOLD = float(os.environ.get("REGIME_TREND_THRESHOLD", "0.3"))
 STATE_FILE = os.environ.get("STATE_FILE", "trade_bot_state.json")
 STOP_LOSS_PERCENT = float(os.environ.get("STOP_LOSS_PERCENT", "3"))
 TAKE_PROFIT_PERCENT = float(os.environ.get("TAKE_PROFIT_PERCENT", "6"))
@@ -216,6 +218,22 @@ def ema_hesapla(fiyat_listesi, periyot):
     for fiyat in fiyat_listesi[periyot:]:
         ema = fiyat * k + ema * (1 - k)
     return ema
+
+
+def verimlilik_orani(fiyatlar, periyot=20):
+    """Kaufman Efficiency Ratio: son `periyot` mumda fiyatin NET ne kadar
+    hareket ettigi / TOPLAM ne kadar zigzag yaptigi orani (0-1 arasi).
+    1'e yakin = guclu/duz trend (fiyat cogunlukla tek yonde ilerlemis).
+    0'a yakin = yatay/dalgali piyasa (ileri geri hareket, net ilerleme az).
+    Rejim (trend vs grid stratejisi) secimi icin kullanilir."""
+    if len(fiyatlar) < periyot + 1:
+        return None
+    pencere = fiyatlar[-(periyot + 1):]
+    net_degisim = abs(pencere[-1] - pencere[0])
+    toplam_hareket = sum(abs(pencere[i] - pencere[i - 1]) for i in range(1, len(pencere)))
+    if toplam_hareket == 0:
+        return 0.0
+    return net_degisim / toplam_hareket
 
 
 def trend_yonu(fiyatlar):

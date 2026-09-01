@@ -5,4 +5,6 @@ trade_bot_state.json
 backtest_trades.csv
 grid_bot_state.json
 grid_backtest_trades.csv
+adaptive_bot_state.json
+adaptive_backtest_trades.csv
 STOP_BOT
