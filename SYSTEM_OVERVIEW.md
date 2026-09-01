@@ -36,18 +36,43 @@ Android telefonunda Termux üzerinden çalıştırıyor.
   = ilk `periyot` elemanın ortalaması.
 - Trend filtresi: `EMA(kısa=50) > EMA(uzun=200)` ise "yükseliş trendi".
 
-**Karar kuralları:**
-- **AL**: `RSI < RSI_BUY_THRESHOLD (30)` **VE** yükseliş trendinde **VE**
-  pozisyonda değilken. Bakiyenin `%TRADE_PERCENT`'i (varsayılan 33) ile alım.
-- **SAT**: pozisyondayken, `RSI > RSI_SELL_THRESHOLD (70)` (aşırı alım/kâr
-  realizasyonu) **VEYA** trend aşağı döndüyse (koruyucu çıkış). Elde
-  tutulan coin'in `%TRADE_PERCENT`'i satılır.
+**Karar kuralları (2. iterasyon — ATR stop/hedef, hacim ve eğim filtresi eklendi):**
+- **AL**: hepsi birden sağlanmalı:
+  1. `RSI < RSI_BUY_THRESHOLD (30)`
+  2. `EMA(kısa=50) > EMA(uzun=200)` (yükseliş trendi)
+  3. Uzun EMA (200), `EMA_SLOPE_LOOKBACK` mum önceki değerinden **hâlâ yüksek**
+     (trend gerçekten güçleniyor mu — kısa EMA değil uzun EMA kullanılıyor,
+     çünkü kısa EMA zaten RSI dip'i sırasında düşer, bunu şart koşmak RSI
+     mantığıyla çelişir)
+  4. Hacim teyidi: güncel mum hacmi, son `VOLUME_PERIOD` mumun ortalamasının
+     `VOLUME_MULTIPLIER` katından fazla
+  5. ATR hesaplanabiliyor (yeterli veri var)
+  6. Pozisyonda değilken
+  
+  Bakiyenin `%TRADE_PERCENT`'i (varsayılan 33) ile alım yapılır. Giriş anında
+  `stop_price = giriş − ATR_STOP_MULTIPLIER×ATR` ve
+  `take_profit_price = giriş + ATR_TP_MULTIPLIER×ATR` hesaplanıp state'e
+  kaydedilir (sabit %'lik stop yerine, o anki oynaklığa göre ölçekli).
+
+- **SAT**: pozisyondayken şunlardan biri yeterli:
+  1. Fiyat `stop_price`'ın altına düştü (stop-loss)
+  2. Fiyat `take_profit_price`'ın üstüne çıktı (kâr hedefi)
+  3. `RSI > RSI_SELL_THRESHOLD (70)` (aşırı alım/kâr realizasyonu)
+  4. Trend aşağı döndü (koruyucu çıkış)
+  
+  Elde tutulan coin'in `%TRADE_PERCENT`'i satılır.
+
 - **Önemli tasarım detayı:** Satış sadece kısmi (%33) olsa da, bot
   `in_position` bayrağını satıştan sonra **koşulsuz** `False` yapıyor — yani
   gerçekte pozisyonun bir kısmı elde kalabilir, ama bot "pozisyon kapandı"
   sayıp yeni bir AL sinyalini tekrar değerlendirmeye başlıyor. Bu basit bir
   basitleştirme; backtest.py bunu bilerek birebir aynı şekilde taklit
   ediyor ki sonuçlar canlı botla tutarlı olsun.
+
+- **backtest.py'de intrabar stop/hedef kontrolü:** Sadece kapanışa değil,
+  mumun `high`/`low` değerlerine bakarak stop/hedefin mum içinde tetiklenip
+  tetiklenmediği kontrol edilir (gerçekçi simülasyon için — sadece kapanışa
+  bakmak, mum içi sert hareketleri kaçırıp gecikmeli/optimistik sonuç verirdi).
 
 **Veri çekme:** `get_klines()` varsayılan `KLINE_INTERVAL=15m` mumlar,
 `POLL_INTERVAL_SECONDS=60` ile kontrol ediliyor — Binance'in "oluşmakta
@@ -84,6 +109,12 @@ RSI_BUY_THRESHOLD=30
 RSI_SELL_THRESHOLD=70
 EMA_TREND_SHORT=50
 EMA_TREND_LONG=200
+EMA_SLOPE_LOOKBACK=3
+ATR_PERIOD=14
+ATR_STOP_MULTIPLIER=1.5
+ATR_TP_MULTIPLIER=3.0
+VOLUME_PERIOD=20
+VOLUME_MULTIPLIER=1.2
 BINANCE_API_KEY=
 BINANCE_API_SECRET=
 CONFIRM_REAL_MONEY=
@@ -108,11 +139,24 @@ python3 backtest.py
 Son `BACKTEST_DAYS` günün geçmiş verisini Binance'in public API'sinden
 çekip stratejiyi simüle eder, özet ve `backtest_trades.csv` üretir.
 
+## Değişiklik geçmişi: kullanıcı backtest bulgusu → strateji güncellemesi
+
+Kullanıcı, ilk sürümü (sadece RSI+EMA trend filtresi, sabit stop yok) 30/90/180
+günlük gerçek Binance verisiyle test etti ve üç dönemde de **zararlı**, iki
+dönemde al-tut'tan **kötü** sonuç bulup canlı botu durdurdu. Belirttiği
+sorunlar: seyrek/geç sinyal, sabit %stop'un oynaklığa uymaması, hacim/rejim
+filtresi eksikliği, stop'un mum kapanışını bekleyip geç kalması. Bunun
+üzerine strateji şu şekilde güncellendi (yukarıdaki "Karar kuralları"
+bölümüne yansıdı): ATR tabanlı (oynaklığa duyarlı) stop-loss/kâr hedefi,
+hacim teyidi, uzun-EMA eğim filtresi, backtest'te intrabar (high/low)
+stop kontrolü. **Bu güncelleme sonrası yeni bir 30/90/180 günlük backtest
+henüz kullanıcı tarafından koşulmadı** — canlıya dönmeden önce mutlaka
+tekrar test edilmeli.
+
 ## Bilinen sınırlamalar / dürüst notlar
 
-- Tek strateji ailesi (RSI+EMA trend filtresi) — stop-loss/take-profit,
-  çoklu coin takibi, işlem geçmişi/performans dashboard'u gibi genişletmeler
-  henüz **eklenmedi** (kullanıcıya soruldu, şu an sadece backtest seçildi).
+- Çoklu coin takibi, işlem geçmişi/performans dashboard'u gibi genişletmeler
+  henüz **eklenmedi**.
 - `in_position` bayrağının kısmi satıştan sonra koşulsuz sıfırlanması,
   gerçek bakiye takibiyle tam örtüşmeyebilir (yukarıda açıklandı).
 - Backtest'teki EMA hesaplaması, geçmiş verinin tamamından tek seferde
@@ -120,8 +164,16 @@ Son `BACKTEST_DAYS` günün geçmiş verisini Binance'in public API'sinden
   çağrısında son `limit=300` mumluk pencereden yeniden seed alıyor — uzun
   vadede ihmal edilebilir bir fark yaratır ama backtest sonucu ile canlı
   botun EMA'sı milimetrik olarak aynı olmayabilir.
-- Bu proje **yatırım tavsiyesi değildir**; RSI+EMA basit bir teknik
-  göstergedir, yanlış sinyal riski yüksektir. Gerçek paraya geçmeden önce
+- Canlı bot, stop-loss'u sadece her `POLL_INTERVAL_SECONDS` (varsayılan 60sn)
+  kontrolünde fiyatı okuyup değerlendiriyor — tick-bazlı/websocket anlık takip
+  yok, iki kontrol arasında olabilecek ani bir fiyat hareketini kaçırabilir.
+  Backtest ise mum içi (high/low) kontrolü yaptığı için canlıdan biraz daha
+  "iyimser" sonuç verebilir.
+- ATR/hacim/eğim parametreleri (`ATR_STOP_MULTIPLIER`, `VOLUME_MULTIPLIER`
+  vb.) hiç optimize edilmedi, varsayılan/tipik değerler kullanıldı — walk
+  forward test veya parametre taraması henüz yapılmadı.
+- Bu proje **yatırım tavsiyesi değildir**; basit teknik göstergelere
+  dayanır, yanlış sinyal riski yüksektir. Gerçek paraya geçmeden önce
   backtest + testnet ile uzunca test edilmesi öneriliyor.
 
 ## Repo / branch bilgisi

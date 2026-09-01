@@ -62,6 +62,12 @@ RSI_BUY_THRESHOLD = float(os.environ.get("RSI_BUY_THRESHOLD", "30"))
 RSI_SELL_THRESHOLD = float(os.environ.get("RSI_SELL_THRESHOLD", "70"))
 EMA_TREND_SHORT = int(os.environ.get("EMA_TREND_SHORT", "50"))
 EMA_TREND_LONG = int(os.environ.get("EMA_TREND_LONG", "200"))
+EMA_SLOPE_LOOKBACK = int(os.environ.get("EMA_SLOPE_LOOKBACK", "3"))
+ATR_PERIOD = int(os.environ.get("ATR_PERIOD", "14"))
+ATR_STOP_MULTIPLIER = float(os.environ.get("ATR_STOP_MULTIPLIER", "1.5"))
+ATR_TP_MULTIPLIER = float(os.environ.get("ATR_TP_MULTIPLIER", "3.0"))
+VOLUME_PERIOD = int(os.environ.get("VOLUME_PERIOD", "20"))
+VOLUME_MULTIPLIER = float(os.environ.get("VOLUME_MULTIPLIER", "1.2"))
 STATE_FILE = os.environ.get("STATE_FILE", "trade_bot_state.json")
 
 BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY", "")
@@ -130,13 +136,39 @@ def rsi_hesapla(fiyat_listesi):
 
 
 def get_klines(interval=None, limit=300):
+    """Kapanis, yuksek, dusuk ve hacim listelerini dondurur (son eleman =
+    olusmakta olan mum). ATR ve hacim filtresi icin yuksek/dusuk/hacim de
+    gerekli, sadece kapanis yeterli degil."""
     data = _http(
         "GET",
         "/api/v3/klines",
         {"symbol": SYMBOL, "interval": interval or KLINE_INTERVAL, "limit": limit},
         base=MAINNET_BASE,  # fiyat verisi icin her zaman mainnet (gercek piyasa)
     )
-    return [float(k[4]) for k in data]  # kapanis fiyatlari (son eleman = olusmakta olan mum)
+    kapanislar = [float(k[4]) for k in data]
+    yuksekler = [float(k[2]) for k in data]
+    dusukler = [float(k[3]) for k in data]
+    hacimler = [float(k[5]) for k in data]
+    return kapanislar, yuksekler, dusukler, hacimler
+
+
+def atr_hesapla(yuksekler, dusukler, kapanislar, periyot=14):
+    """Ortalama Gercek Aralik (Average True Range) - oynakliga gore stop/kar
+    hedefi belirlemek icin. Basit hareketli ortalama kullanir (rsi_hesapla ile
+    tutarli olsun diye Wilder yumusatmasi yerine)."""
+    if len(kapanislar) < periyot + 1:
+        return None
+    gercek_araliklar = []
+    for i in range(1, len(kapanislar)):
+        tr = max(
+            yuksekler[i] - dusukler[i],
+            abs(yuksekler[i] - kapanislar[i - 1]),
+            abs(dusukler[i] - kapanislar[i - 1]),
+        )
+        gercek_araliklar.append(tr)
+    if len(gercek_araliklar) < periyot:
+        return None
+    return sum(gercek_araliklar[-periyot:]) / periyot
 
 
 def ema_hesapla(fiyat_listesi, periyot):
@@ -176,10 +208,13 @@ def place_order(side, quote_or_base_qty, use_quote_qty):
 
 
 def load_state():
+    varsayilan = {"in_position": False, "stop_price": None, "take_profit_price": None}
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE) as f:
-            return json.load(f)
-    return {"in_position": False}
+            kayitli = json.load(f)
+        varsayilan.update(kayitli)
+        return varsayilan
+    return varsayilan
 
 
 def save_state(state):
@@ -218,30 +253,72 @@ def check_mode_guard():
 
 
 def run_once(state):
-    fiyatlar = get_klines()
-    fiyat = fiyatlar[-1]
-    rsi = rsi_hesapla(fiyatlar)
-    yukselis_trendi = trend_yonu(fiyatlar)
+    kapanislar, yuksekler, dusukler, hacimler = get_klines()
+    fiyat = kapanislar[-1]
+    rsi = rsi_hesapla(kapanislar)
+    yukselis_trendi = trend_yonu(kapanislar)
+
+    # Egim icin kisa EMA degil, UZUN EMA (200) kullanilir: kisa EMA zaten RSI
+    # dususu sirasinda asagi doner (bu tam da alinmak istenen dip), o yuzden
+    # kisa EMA'nin egimini sart kosmak RSI mantigiyla celisir. Uzun EMA cok
+    # daha yavas tepki verdigi icin kisa vadeli bir geri cekilmede bile ana
+    # trendin gercekten guclenip guclenmedigini gosterir.
+    ema_uzun_simdi = ema_hesapla(kapanislar, EMA_TREND_LONG)
+    ema_uzun_once = (
+        ema_hesapla(kapanislar[:-EMA_SLOPE_LOOKBACK], EMA_TREND_LONG)
+        if len(kapanislar) > EMA_TREND_LONG + EMA_SLOPE_LOOKBACK
+        else None
+    )
+    trend_yukseliyor = (
+        None if ema_uzun_simdi is None or ema_uzun_once is None else ema_uzun_simdi > ema_uzun_once
+    )
+
+    atr = atr_hesapla(yuksekler, dusukler, kapanislar, ATR_PERIOD)
+
+    ortalama_hacim = (
+        sum(hacimler[-VOLUME_PERIOD:]) / VOLUME_PERIOD if len(hacimler) >= VOLUME_PERIOD else None
+    )
+    guncel_hacim = hacimler[-1]
+    hacim_teyidi = ortalama_hacim is not None and guncel_hacim > ortalama_hacim * VOLUME_MULTIPLIER
+
     zaman = time.strftime("%d/%m/%Y %H:%M:%S")
     trend_etiket = "?" if yukselis_trendi is None else ("YUKARI" if yukselis_trendi else "ASAGI")
 
     al_sinyali = (
-        rsi < RSI_BUY_THRESHOLD
+        not state["in_position"]
+        and rsi < RSI_BUY_THRESHOLD
         and yukselis_trendi is True  # sadece yukselis trendinde al (dususte "dusen bicak" alimi yok)
-        and not state["in_position"]
+        and trend_yukseliyor is True  # EMA egimi de yukari olsun (yataylasan/donen trende girme)
+        and hacim_teyidi  # dusuk hacimli, guvenilmez hareketleri eleme
+        and atr is not None  # ATR yoksa stop/kar hedefi konulamaz, islem yapma
+    )
+
+    stop_tetiklendi = state["in_position"] and state.get("stop_price") and fiyat <= state["stop_price"]
+    tp_tetiklendi = (
+        state["in_position"]
+        and not stop_tetiklendi
+        and state.get("take_profit_price")
+        and fiyat >= state["take_profit_price"]
     )
     sat_sinyali = state["in_position"] and (
-        rsi > RSI_SELL_THRESHOLD  # asiri alim -> kar realizasyonu
+        stop_tetiklendi
+        or tp_tetiklendi
+        or rsi > RSI_SELL_THRESHOLD  # asiri alim -> kar realizasyonu
         or yukselis_trendi is False  # trend bozuldu -> koruyucu cikis
     )
 
     if al_sinyali:
+        stop_fiyati = fiyat - ATR_STOP_MULTIPLIER * atr
+        kar_hedefi = fiyat + ATR_TP_MULTIPLIER * atr
         if MODE == "dry_run":
             notify(
                 f"🟢 [SIMULE] {zaman} - {SYMBOL} RSI={rsi:.1f} trend={trend_etiket} fiyat={fiyat} "
-                f"-> bakiyenin %{TRADE_PERCENT} ile ALIM yapilirdi."
+                f"-> bakiyenin %{TRADE_PERCENT} ile ALIM yapilirdi. "
+                f"Stop={stop_fiyati:.8f} Hedef={kar_hedefi:.8f}"
             )
             state["in_position"] = True
+            state["stop_price"] = stop_fiyati
+            state["take_profit_price"] = kar_hedefi
         else:
             bakiye = get_balance(QUOTE_ASSET)
             harcanacak = bakiye * (TRADE_PERCENT / 100)
@@ -250,18 +327,27 @@ def run_once(state):
             else:
                 order = place_order("BUY", harcanacak, use_quote_qty=True)
                 notify(
-                    f"🟢 [{MODE.upper()}] ALIM emri gonderildi (RSI={rsi:.1f} trend={trend_etiket}): {order}"
+                    f"🟢 [{MODE.upper()}] ALIM emri gonderildi (RSI={rsi:.1f} trend={trend_etiket} "
+                    f"Stop={stop_fiyati:.8f} Hedef={kar_hedefi:.8f}): {order}"
                 )
                 state["in_position"] = True
+                state["stop_price"] = stop_fiyati
+                state["take_profit_price"] = kar_hedefi
 
     elif sat_sinyali:
-        sebep = "asiri alim" if rsi > RSI_SELL_THRESHOLD else "trend bozuldu"
+        if stop_tetiklendi:
+            sebep = "stop-loss"
+        elif tp_tetiklendi:
+            sebep = "kar hedefi"
+        elif rsi > RSI_SELL_THRESHOLD:
+            sebep = "asiri alim"
+        else:
+            sebep = "trend bozuldu"
         if MODE == "dry_run":
             notify(
                 f"🔴 [SIMULE] {zaman} - {SYMBOL} RSI={rsi:.1f} trend={trend_etiket} fiyat={fiyat} "
                 f"-> {sebep} nedeniyle pozisyonun %{TRADE_PERCENT} ile SATIS yapilirdi."
             )
-            state["in_position"] = False
         else:
             bakiye = get_balance(BASE_ASSET)
             satilacak = bakiye * (TRADE_PERCENT / 100)
@@ -272,10 +358,16 @@ def run_once(state):
                 notify(
                     f"🔴 [{MODE.upper()}] SATIS emri gonderildi ({sebep}, RSI={rsi:.1f} trend={trend_etiket}): {order}"
                 )
-                state["in_position"] = False
+        state["in_position"] = False
+        state["stop_price"] = None
+        state["take_profit_price"] = None
     else:
         pozisyon = "POZISYONDA" if state["in_position"] else "BEKLEMEDE"
-        print(f"{zaman} - {SYMBOL} RSI={rsi:.1f} trend={trend_etiket} fiyat={fiyat} [{pozisyon}] -> islem yok.")
+        hacim_etiket = "yeterli" if hacim_teyidi else "yetersiz"
+        print(
+            f"{zaman} - {SYMBOL} RSI={rsi:.1f} trend={trend_etiket} egim={'yukari' if trend_yukseliyor else 'asagi/?'} "
+            f"hacim={hacim_etiket} fiyat={fiyat} [{pozisyon}] -> islem yok."
+        )
 
     save_state(state)
 
