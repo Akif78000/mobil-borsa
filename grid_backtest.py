@@ -41,13 +41,19 @@ def simulate(kapanislar, zamanlar):
     if START_IN_SHIB:
         usdt = 0.0
         coin = BACKTEST_START_CAPITAL / kapanislar[0]
+        # Elde tutulan SHIB, satilabilir bir "lot" olarak kaydedilmezse bot hicbir
+        # zaman ilk satisi yapamaz (USDT'si olmadigi icin sonra alim da yapamaz) -
+        # tamamen hareketsiz kalir. Baslangic pozisyonunu, giris fiyati ilk mumun
+        # kapanisi olan normal bir lot gibi ekleyerek grid'in ilk gunden calismasini
+        # sagliyoruz.
+        open_lots = [{"qty": coin, "entry_price": kapanislar[0], "quote_spent": BACKTEST_START_CAPITAL}]
     else:
         usdt = BACKTEST_START_CAPITAL
         coin = 0.0
+        open_lots = []  # {"qty", "entry_price", "quote_spent"}
     baslangic_coin_esdeger = coin + usdt / kapanislar[0]
 
     referans_fiyat = kapanislar[0]
-    open_lots = []  # {"qty", "entry_price", "quote_spent"}
     trades = []
     equity_egrisi = []
     coin_egrisi = []
