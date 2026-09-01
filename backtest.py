@@ -39,6 +39,11 @@ EMA_TREND_SHORT = int(os.environ.get("EMA_TREND_SHORT", "50"))
 EMA_TREND_LONG = int(os.environ.get("EMA_TREND_LONG", "200"))
 BACKTEST_DAYS = int(os.environ.get("BACKTEST_DAYS", "30"))
 BACKTEST_START_CAPITAL = float(os.environ.get("BACKTEST_START_CAPITAL", "1000"))
+# true: simulasyon USDT yerine SHIB ile baslar (zaten elinde SHIB tutan, dolar
+# degerini degil TOKEN ADEDINI artirmak isteyen kullanicilar icin). Bu durumda
+# BACKTEST_START_CAPITAL, o SHIB'in baslangictaki USDT karsiligi (deger) olarak
+# yorumlanir; ilk mumun fiyatiyla token adedine cevrilir.
+START_IN_SHIB = os.environ.get("START_IN_SHIB", "false").lower() in ("1", "true", "evet")
 STOP_LOSS_PERCENT = float(os.environ.get("STOP_LOSS_PERCENT", "3"))
 TAKE_PROFIT_PERCENT = float(os.environ.get("TAKE_PROFIT_PERCENT", "6"))
 TRADING_FEE_PERCENT = float(os.environ.get("TRADING_FEE_PERCENT", "0.1"))
@@ -111,14 +116,26 @@ def simulate(kapanislar, yuksekler, dusukler, hacimler, zamanlar):
     ema_kisa_serisi = compute_ema_series(kapanislar, EMA_TREND_SHORT)
     ema_uzun_serisi = compute_ema_series(kapanislar, EMA_TREND_LONG)
 
-    usdt = BACKTEST_START_CAPITAL
-    coin = 0.0
-    in_position = False
-    giris_fiyati = None
+    if START_IN_SHIB:
+        # Zaten SHIB tutan kullanici: baslangicta USDT degil, dogrudan SHIB
+        # ile basla. in_position=True, ilk cikis sinyali (RSI/trend) gelene
+        # kadar stop/kar_al henuz yok (ilk "yeniden alim" ile olusacak).
+        ilk_fiyat_t0 = kapanislar[min_gerekli]
+        usdt = 0.0
+        coin = BACKTEST_START_CAPITAL / ilk_fiyat_t0
+        in_position = True
+        giris_fiyati = ilk_fiyat_t0
+    else:
+        usdt = BACKTEST_START_CAPITAL
+        coin = 0.0
+        in_position = False
+        giris_fiyati = None
+    baslangic_coin = coin
     stop_fiyati = None
     kar_al_fiyati = None
     trades = []
     equity_egrisi = []
+    coin_egrisi = []
 
     for i in range(min_gerekli, len(kapanislar)):
         fiyat = kapanislar[i]
@@ -155,8 +172,8 @@ def simulate(kapanislar, yuksekler, dusukler, hacimler, zamanlar):
         elif in_position and (
             rsi > RSI_SELL_THRESHOLD
             or trend_yukari is False
-            or fiyat <= stop_fiyati
-            or fiyat >= kar_al_fiyati
+            or (stop_fiyati is not None and fiyat <= stop_fiyati)
+            or (kar_al_fiyati is not None and fiyat >= kar_al_fiyati)
         ):
             satilacak_coin = coin
             if satilacak_coin > 0:
@@ -164,9 +181,9 @@ def simulate(kapanislar, yuksekler, dusukler, hacimler, zamanlar):
                 usdt += brut_tutar * (1 - TRADING_FEE_PERCENT / 100)
                 coin -= satilacak_coin
                 kar_yuzde = (fiyat - giris_fiyati) / giris_fiyati * 100
-                if fiyat <= stop_fiyati:
+                if stop_fiyati is not None and fiyat <= stop_fiyati:
                     sebep = "stop_loss"
-                elif fiyat >= kar_al_fiyati:
+                elif kar_al_fiyati is not None and fiyat >= kar_al_fiyati:
                     sebep = "kar_al"
                 elif rsi > RSI_SELL_THRESHOLD:
                     sebep = "asiri_alim"
@@ -180,11 +197,12 @@ def simulate(kapanislar, yuksekler, dusukler, hacimler, zamanlar):
             kar_al_fiyati = None
 
         equity_egrisi.append(usdt + coin * fiyat)
+        coin_egrisi.append(coin + usdt / fiyat)  # o anki fiyattan "tum varlik SHIB olsa kac token" esdegeri
 
-    return trades, equity_egrisi, kapanislar[min_gerekli]
+    return trades, equity_egrisi, coin_egrisi, baslangic_coin, kapanislar[min_gerekli]
 
 
-def ozet_yazdir(trades, equity_egrisi, ilk_fiyat, son_fiyat, mum_sayisi):
+def ozet_yazdir(trades, equity_egrisi, coin_egrisi, baslangic_coin, ilk_fiyat, son_fiyat, mum_sayisi):
     toplam_deger = equity_egrisi[-1] if equity_egrisi else BACKTEST_START_CAPITAL
     getiri_yuzde = (toplam_deger - BACKTEST_START_CAPITAL) / BACKTEST_START_CAPITAL * 100
 
@@ -215,9 +233,23 @@ def ozet_yazdir(trades, equity_egrisi, ilk_fiyat, son_fiyat, mum_sayisi):
     print(f"Karli islem orani      : %{kazanma_orani:.1f}")
     print(f"Ortalama islem kari    : {ort_kar:+.2f}%")
     print(f"En buyuk gerileme (DD) : {max_dusus:.2f}%")
+
+    if START_IN_SHIB and coin_egrisi:
+        bitis_coin = coin_egrisi[-1]
+        token_degisim = (bitis_coin - baslangic_coin) / baslangic_coin * 100
+        print("-" * 56)
+        print(f"Baslangic token miktari: {baslangic_coin:,.0f} {SYMBOL.replace('USDT','')}")
+        print(f"Bitis token miktari    : {bitis_coin:,.0f} {SYMBOL.replace('USDT','')}")
+        print(f"TOKEN ADEDI DEGISIMI   : {token_degisim:+.2f}%  (sadece tutsaydiniz: %0,00)")
+
     print("=" * 56)
 
-    if getiri_yuzde > al_ve_tut_getiri:
+    if START_IN_SHIB:
+        if coin_egrisi and coin_egrisi[-1] > baslangic_coin:
+            print("Strateji, sadece tutmaya kiyasla DAHA FAZLA token biriktirdi.")
+        else:
+            print("Strateji, sadece tutmaya kiyasla token adedini ARTIRAMADI (ayni kaldi/azaldi).")
+    elif getiri_yuzde > al_ve_tut_getiri:
         print("Strateji, bu donemde sadece alip tutmaktan DAHA IYI sonuc verdi.")
     else:
         print("Strateji, bu donemde sadece alip tutmaktan DAHA KOTU sonuc verdi.")
@@ -242,8 +274,10 @@ def main():
     dusukler = [float(c[3]) for c in candles]
     hacimler = [float(c[5]) for c in candles]
     zamanlar = [c[0] for c in candles]
-    trades, equity_egrisi, ilk_fiyat = simulate(kapanislar, yuksekler, dusukler, hacimler, zamanlar)
-    ozet_yazdir(trades, equity_egrisi, ilk_fiyat, kapanislar[-1], len(candles))
+    trades, equity_egrisi, coin_egrisi, baslangic_coin, ilk_fiyat = simulate(
+        kapanislar, yuksekler, dusukler, hacimler, zamanlar
+    )
+    ozet_yazdir(trades, equity_egrisi, coin_egrisi, baslangic_coin, ilk_fiyat, kapanislar[-1], len(candles))
 
 
 if __name__ == "__main__":
