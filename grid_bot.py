@@ -60,6 +60,12 @@ GRID_POLL_INTERVAL_SECONDS = int(os.environ.get("GRID_POLL_INTERVAL_SECONDS", "3
 MAX_DAILY_LOSS_PERCENT = float(os.environ.get("MAX_DAILY_LOSS_PERCENT", "2"))
 GRID_STATE_FILE = os.environ.get("GRID_STATE_FILE", "grid_bot_state.json")
 CONFIRM_REAL_MONEY = os.environ.get("CONFIRM_REAL_MONEY", "")
+# Botu USDT'siz, elde zaten SHIB varken baslatmak icin: ilk calismada mevcut
+# BASE_ASSET bakiyesinin bu yuzdesi tek seferlik "baslangic lotu" olarak grid
+# havuzuna kaydedilir (fiyat yukselince satilir, dusunce geri alinir). Geri
+# kalan yuzde bota hic tanitilmaz, asla satilmaz. 0 = kapali (varsayilan,
+# eski davranis - bot sadece USDT ile alim yaparak baslar).
+GRID_SEED_SHIB_PERCENT = float(os.environ.get("GRID_SEED_SHIB_PERCENT", "0"))
 
 
 def get_price():
@@ -122,6 +128,8 @@ def check_mode_guard():
         raise SystemExit("GRID_MAX_OPEN_LOTS en az 1 olmali.")
     if not 0 <= GRID_RESERVE_PERCENT < 100:
         raise SystemExit("GRID_RESERVE_PERCENT 0-100 araliginda olmali.")
+    if not 0 <= GRID_SEED_SHIB_PERCENT <= 100:
+        raise SystemExit("GRID_SEED_SHIB_PERCENT 0-100 araliginda olmali.")
 
 
 def run_once(state):
@@ -134,6 +142,21 @@ def run_once(state):
     if state["last_reference_price"] is None:
         state["last_reference_price"] = fiyat
         notify(f"{zaman} - Grid baslangic referans fiyati ayarlandi: {fiyat}")
+        if MODE != "dry_run" and GRID_SEED_SHIB_PERCENT > 0 and not state["open_lots"]:
+            coin_bakiye = get_balance(BASE_ASSET)
+            seed_qty = coin_bakiye * (GRID_SEED_SHIB_PERCENT / 100)
+            if seed_qty > 0:
+                state["open_lots"].append({
+                    "qty": seed_qty,
+                    "entry_price": fiyat,
+                    "quote_spent": seed_qty * fiyat,
+                })
+                notify(
+                    f"🌱 Mevcut {BASE_ASSET} bakiyesinin %{GRID_SEED_SHIB_PERCENT:.0f}'i "
+                    f"({seed_qty:,.0f} {BASE_ASSET}) baslangic lotu olarak grid havuzuna "
+                    f"eklendi (giris fiyati={fiyat}, hedef=%{GRID_STEP_UP_PERCENT} yukarida "
+                    f"satis). Kalan bakiyeye bot hic dokunmaz."
+                )
         save_state(state)
         return
 

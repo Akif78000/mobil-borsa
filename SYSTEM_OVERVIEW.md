@@ -313,6 +313,25 @@ riskini artırmamak için). Bu bilinçli bir "beklenen getiriden biraz feragat
 edip tail-risk sigortası satın alma" kararıdır, optimize edilmiş bir sayı
 değildir.
 
+**Canlı grid botu USDT olmadan başlayamıyordu (`GRID_SEED_SHIB_PERCENT` eklendi,
+02.09.2026):** Kullanıcı botu `MODE=live` ile başlattı; ~14.5 saat sorunsuz
+çalıştı ama fiyat alım eşiğine her indiğinde `⚠️ USDT bakiyesi yetersiz, grid
+alimi atlandi` uyarısı verdi ve hiç işlem yapamadı. Kök neden: kullanıcının
+gerçek Binance bakiyesi USDT değil, SHIB idi — ama `grid_bot.py`'nin canlı
+sürümü (backtest'teki `START_IN_SHIB`'in aksine) `open_lots`'u her zaman boş
+başlatıyordu, yani mevcut SHIB bakiyesini hiç "satılabilir lot" olarak
+tanımıyordu. Bot yalnızca kendi satın aldığı miktarları takip ettiği için,
+USDT'siz bir hesapta asla ilk alımı yapamıyor, dolayısıyla asla satış da
+yapamıyordu — mevcut SHIB tamamen hareketsiz kalıyordu. Çözüm: yeni
+`GRID_SEED_SHIB_PERCENT` ayarı (varsayılan 0 = kapalı, eski davranış).
+Kullanıcı elindeki SHIB'in yarısını (%50) aktif ticaret havuzuna ayırmayı
+seçti (diğer yarısına bot hiç dokunmuyor); bu ayar `1` olduğunda ilk
+çalıştırmada mevcut `BASE_ASSET` bakiyesinin belirtilen yüzdesi, o anki
+fiyattan tek seferlik bir "başlangıç lotu" olarak `open_lots`'a kaydediliyor
+— böylece bot fiyat yükselince bu payı satabiliyor, sonra düşünce geri
+alabiliyor. Bu, kullanıcının 3 yıldır tuttuğu pozisyonun bir kısmını aktif
+riske sokan bilinçli bir tercih; geri kalan yarı kalıcı olarak dokunulmaz.
+
 ## Bilinen sınırlamalar / dürüst notlar
 
 - Çoklu coin takibi, işlem geçmişi/performans dashboard'u gibi genişletmeler
