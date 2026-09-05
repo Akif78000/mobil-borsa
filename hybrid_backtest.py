@@ -370,7 +370,10 @@ def run_for_days(days):
     _master_tablo(satirlar)
 
     en_iyi_token = max(satirlar, key=lambda s: s["token_degisim"])
-    en_iyi_dd = min(satirlar, key=lambda s: s["max_dusus"])
+    # max_dusus DAIMA <=0 (orn. -8.5, -39.1) - "en iyi/en dusuk dusus" en KUCUK
+    # BUYUKLUKTEKI (sifira en yakin) degerdir, yani bu negatif sayilar arasinda
+    # en BUYUK (max()) olan - min() yanlislikla EN KOTU/EN DERIN dususu seçerdi.
+    en_iyi_dd = max(satirlar, key=lambda s: s["max_dusus"])
     en_iyi_net = max((s for s in satirlar if s["net_getiri"] is not None), key=lambda s: s["net_getiri"])
     print(f"\n--- {days} GUN OZET SORULARI ---")
     print(f"En yuksek NET USDT getirisi : {en_iyi_net['sistem']} ({en_iyi_net['net_getiri']:+.2f}%)")
