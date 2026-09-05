@@ -174,6 +174,64 @@ def wavetrend(highs, lows, closes, n1=10, n2=21, n3=4):
     return wt1, wt2
 
 
+def supertrend(highs, lows, closes, period=10, multiplier=3.0):
+    """SuperTrend - ATR bantlariyla trend YONU (+1/-1) uretir, EMA kesisimine
+    kiyasla trend donuslerini genelde daha erken yakalar (fiyat bandi kirinca
+    ANINDA doner, iki ortalamanin kesismesini beklemez). Donen: (yon_serisi,
+    supertrend_cizgisi). Isinma suresi boyunca yon=None."""
+    n = len(closes)
+    atr_series = atr(highs, lows, closes, period)
+    yon = [None] * n
+    cizgi = [None] * n
+    ilk_idx = None
+    for i in range(n):
+        if atr_series[i] is None:
+            continue
+        hl2 = (highs[i] + lows[i]) / 2
+        ust_band = hl2 + multiplier * atr_series[i]
+        alt_band = hl2 - multiplier * atr_series[i]
+        if ilk_idx is None:
+            ilk_idx = i
+            final_ust, final_alt = ust_band, alt_band
+            yon[i] = 1
+            cizgi[i] = final_alt
+            continue
+        onceki_kapanis = closes[i - 1]
+        final_ust = ust_band if (ust_band < final_ust or onceki_kapanis > final_ust) else final_ust
+        final_alt = alt_band if (alt_band > final_alt or onceki_kapanis < final_alt) else final_alt
+        onceki_yon = yon[i - 1] if yon[i - 1] is not None else 1
+        if closes[i] > final_ust:
+            yon[i] = 1
+        elif closes[i] < final_alt:
+            yon[i] = -1
+        else:
+            yon[i] = onceki_yon
+        cizgi[i] = final_alt if yon[i] == 1 else final_ust
+    return yon, cizgi
+
+
+def kama(closes, period=10, fast=2, slow=30):
+    """Kaufman Adaptive Moving Average - Kaufman Verimlilik Orani'na (bkz.
+    adaptive_bot.py) gore hizini kendi ayarlar: piyasa duz/trendliyken hizli
+    (fiyati yakindan takip eder), yatay/gurultuluyken yavas (duz kalir, sahte
+    sinyal uretmez). SHIB gibi cogunlukla yatay-ile-ani-sicrama dogasindaki
+    bir varlik icin EMA'dan daha az "yalan sinyal" vermesi beklenir."""
+    n = len(closes)
+    result = [None] * n
+    if n < period + 1:
+        return result
+    fastest_sc = 2 / (fast + 1)
+    slowest_sc = 2 / (slow + 1)
+    result[period] = closes[period]
+    for i in range(period + 1, n):
+        degisim = abs(closes[i] - closes[i - period])
+        gurultu = sum(abs(closes[j] - closes[j - 1]) for j in range(i - period + 1, i + 1))
+        er = (degisim / gurultu) if gurultu != 0 else 0.0
+        sc = (er * (fastest_sc - slowest_sc) + slowest_sc) ** 2
+        result[i] = result[i - 1] + sc * (closes[i] - result[i - 1])
+    return result
+
+
 def volume_ratio(volumes, period=20):
     """Guncel hacim / son `period` barin ortalama hacmi. >1 = ortalamanin
     ustunde katilim."""
