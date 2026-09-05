@@ -87,8 +87,12 @@ GRID_TREND_FILTER_ENABLED = GRID_TREND_FILTER_1H_PERCENT > -100 or GRID_TREND_FI
 # saatlik hem son 24 saatlik degisim ESIGIN USTUNDEYSE al (long), ikisinden
 # biri ESIGIN ALTINA duserse sat (flat). 0 = kapali (varsayilan).
 GRID_TREND_ALLOCATION_PERCENT = float(os.environ.get("GRID_TREND_ALLOCATION_PERCENT", "0"))
-GRID_TREND_ENTRY_PERCENT = float(os.environ.get("GRID_TREND_ENTRY_PERCENT", "0.3"))
-GRID_TREND_EXIT_PERCENT = float(os.environ.get("GRID_TREND_EXIT_PERCENT", "-0.3"))
+# %0.3/-0.3 varsayilaniyla gercek veride test edildiginde 5dk gurultusune bile
+# tepki verip gunde 5-10 kez alim-satim yaparak komisyonla kendini eritti
+# (180 gunde alt-havuzun %92'si komisyona gitti). Minimum %1 fark sarti
+# konarak asiri islem onlenir - grid'in kendi %1 adimiyla da tutarli.
+GRID_TREND_ENTRY_PERCENT = float(os.environ.get("GRID_TREND_ENTRY_PERCENT", "1"))
+GRID_TREND_EXIT_PERCENT = float(os.environ.get("GRID_TREND_EXIT_PERCENT", "-1"))
 GRID_TREND_POOL_ENABLED = GRID_TREND_ALLOCATION_PERCENT > 0
 
 _trend_cache = {"checked_at": 0.0, "change_1h": 0.0, "change_24h": 0.0}

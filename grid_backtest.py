@@ -44,8 +44,8 @@ GRID_TREND_FILTER_24H_PERCENT = float(os.environ.get("GRID_TREND_FILTER_24H_PERC
 # grid'den ayrilip kendi ic sayaçlarini kullanan bagimsiz bir trend takip
 # pozisyonu olarak simule edilir (bkz. o dosyadaki aciklama).
 GRID_TREND_ALLOCATION_PERCENT = float(os.environ.get("GRID_TREND_ALLOCATION_PERCENT", "0"))
-GRID_TREND_ENTRY_PERCENT = float(os.environ.get("GRID_TREND_ENTRY_PERCENT", "0.3"))
-GRID_TREND_EXIT_PERCENT = float(os.environ.get("GRID_TREND_EXIT_PERCENT", "-0.3"))
+GRID_TREND_ENTRY_PERCENT = float(os.environ.get("GRID_TREND_ENTRY_PERCENT", "1"))
+GRID_TREND_EXIT_PERCENT = float(os.environ.get("GRID_TREND_EXIT_PERCENT", "-1"))
 
 
 def simulate(kapanislar, zamanlar):
