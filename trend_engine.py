@@ -39,12 +39,20 @@ DETECTORS = ("EMA", "SUPERTREND", "KAMA")
 
 class TimeframeSeries:
     """Bir sembol+zaman dilimi icin gostergeler. `index_at()` bir zaman
-    damgasina kadar KAPANMIS son barin index'ini bulur (lookahead yok)."""
+    damgasina kadar KAPANMIS son barin index'ini bulur.
 
-    def __init__(self, open_times, highs, lows, closes, volumes, detector="EMA"):
+    ONEMLI DUZELTME: eskiden bisect open_times uzerinde yapiliyordu - bu,
+    henuz KAPANMAMIS bir barin (orn. saat tam 15:00'te, 15:00-16:00 1sa
+    barinin ACILDIGI an) yanlislikla "bilinen son bar" sayilmasina yol
+    aciyordu (bir tur lookahead/repaint riski). Simdi close_time = open_time
+    + interval_ms uzerinden bisect yapiliyor - bir bar sadece GERCEKTEN
+    kapandiktan sonra (timestamp >= close_time) kullanilabiliyor."""
+
+    def __init__(self, open_times, highs, lows, closes, volumes, interval_ms, detector="EMA"):
         if detector not in DETECTORS:
             raise ValueError(f"Bilinmeyen dedektor: {detector}")
         self.open_times = open_times
+        self.close_times = [t + interval_ms for t in open_times]
         self.closes = closes
         self.detector = detector
         if detector == "EMA":
@@ -57,7 +65,7 @@ class TimeframeSeries:
         self.adx = ri.adx(highs, lows, closes, 14)
 
     def index_at(self, timestamp_ms):
-        idx = bisect.bisect_right(self.open_times, timestamp_ms) - 1
+        idx = bisect.bisect_right(self.close_times, timestamp_ms) - 1
         return idx if idx >= 0 else None
 
     def trend_vote(self, idx):
