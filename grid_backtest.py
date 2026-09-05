@@ -40,6 +40,12 @@ START_IN_SHIB = os.environ.get("START_IN_SHIB", "false").lower() in ("1", "true"
 # aciklama. Sadece ALIM'i etkiler, SATIS mantigina hic dokunmaz.
 GRID_TREND_FILTER_1H_PERCENT = float(os.environ.get("GRID_TREND_FILTER_1H_PERCENT", "-100"))
 GRID_TREND_FILTER_24H_PERCENT = float(os.environ.get("GRID_TREND_FILTER_24H_PERCENT", "-100"))
+# grid_bot.py'deki trend ALT-HAVUZUNUN backtest karsiligi - seed'in bu yuzdesi
+# grid'den ayrilip kendi ic sayaçlarini kullanan bagimsiz bir trend takip
+# pozisyonu olarak simule edilir (bkz. o dosyadaki aciklama).
+GRID_TREND_ALLOCATION_PERCENT = float(os.environ.get("GRID_TREND_ALLOCATION_PERCENT", "0"))
+GRID_TREND_ENTRY_PERCENT = float(os.environ.get("GRID_TREND_ENTRY_PERCENT", "0.3"))
+GRID_TREND_EXIT_PERCENT = float(os.environ.get("GRID_TREND_EXIT_PERCENT", "-0.3"))
 
 
 def simulate(kapanislar, zamanlar):
@@ -57,6 +63,18 @@ def simulate(kapanislar, zamanlar):
         coin = 0.0
         open_lots = []  # {"qty", "entry_price", "quote_spent"}
     baslangic_coin_esdeger = coin + usdt / kapanislar[0]
+
+    trend_pool = None
+    if GRID_TREND_ALLOCATION_PERCENT > 0:
+        trend_value = BACKTEST_START_CAPITAL * (GRID_TREND_ALLOCATION_PERCENT / 100)
+        if START_IN_SHIB:
+            trend_qty = trend_value / kapanislar[0]
+            open_lots[0]["qty"] -= trend_qty
+            open_lots[0]["quote_spent"] -= trend_value
+            trend_pool = {"position": "long", "qty_shib": trend_qty, "qty_usdt": 0.0}
+        else:
+            usdt -= trend_value
+            trend_pool = {"position": "flat", "qty_shib": 0.0, "qty_usdt": trend_value}
 
     referans_fiyat = kapanislar[0]
     trades = []
@@ -77,6 +95,36 @@ def simulate(kapanislar, zamanlar):
             (GRID_TREND_FILTER_1H_PERCENT > -100 and change_1h is not None and change_1h <= GRID_TREND_FILTER_1H_PERCENT)
             or (GRID_TREND_FILTER_24H_PERCENT > -100 and change_24h is not None and change_24h <= GRID_TREND_FILTER_24H_PERCENT)
         )
+
+        if trend_pool is not None:
+            if trend_pool["position"] == "long":
+                exit_tetik = (
+                    (change_1h is not None and change_1h <= GRID_TREND_EXIT_PERCENT)
+                    or (change_24h is not None and change_24h <= GRID_TREND_EXIT_PERCENT)
+                )
+                if exit_tetik and trend_pool["qty_shib"] > 0:
+                    brut = trend_pool["qty_shib"] * fiyat
+                    net = brut * (1 - TRADING_FEE_PERCENT / 100)
+                    usdt += net
+                    coin -= trend_pool["qty_shib"]
+                    trades.append({"tip": "TREND_SAT", "tarih": tarih, "fiyat": fiyat})
+                    trend_pool["qty_usdt"] = net
+                    trend_pool["qty_shib"] = 0.0
+                    trend_pool["position"] = "flat"
+            else:
+                entry_tetik = (
+                    change_1h is not None and change_24h is not None
+                    and change_1h >= GRID_TREND_ENTRY_PERCENT and change_24h >= GRID_TREND_ENTRY_PERCENT
+                )
+                if entry_tetik and trend_pool["qty_usdt"] > 0:
+                    alim_ucreti = trend_pool["qty_usdt"] * TRADING_FEE_PERCENT / 100
+                    qty = (trend_pool["qty_usdt"] - alim_ucreti) / fiyat
+                    usdt -= trend_pool["qty_usdt"]
+                    coin += qty
+                    trades.append({"tip": "TREND_AL", "tarih": tarih, "fiyat": fiyat})
+                    trend_pool["qty_shib"] = qty
+                    trend_pool["qty_usdt"] = 0.0
+                    trend_pool["position"] = "long"
 
         # Cikislar (kar hedefi/stop-loss) her zaman yeni alimdan ONCE kontrol
         # edilir - koruyucu satis, yeni pozisyon acmaktan daha oncelikli olmali.
@@ -112,10 +160,10 @@ def simulate(kapanislar, zamanlar):
         equity_egrisi.append(usdt + coin * fiyat)
         coin_egrisi.append(coin + usdt / fiyat)
 
-    return trades, equity_egrisi, coin_egrisi, baslangic_coin_esdeger, len(open_lots)
+    return trades, equity_egrisi, coin_egrisi, baslangic_coin_esdeger, len(open_lots), trend_pool
 
 
-def ozet_yazdir(trades, equity_egrisi, coin_egrisi, baslangic_coin, acik_lot_sayisi, mum_sayisi):
+def ozet_yazdir(trades, equity_egrisi, coin_egrisi, baslangic_coin, acik_lot_sayisi, mum_sayisi, trend_pool=None):
     toplam_deger = equity_egrisi[-1] if equity_egrisi else BACKTEST_START_CAPITAL
     getiri_yuzde = (toplam_deger - BACKTEST_START_CAPITAL) / BACKTEST_START_CAPITAL * 100
 
@@ -155,6 +203,12 @@ def ozet_yazdir(trades, equity_egrisi, coin_egrisi, baslangic_coin, acik_lot_say
     print(f"Baslangic token esdegeri: {baslangic_coin:,.0f} {SYMBOL.replace('USDT', '')}")
     print(f"Bitis token esdegeri    : {bitis_coin:,.0f} {SYMBOL.replace('USDT', '')}")
     print(f"TOKEN ADEDI DEGISIMI    : {token_degisim:+.2f}%  (sadece tutsaydiniz: %0,00)")
+    if trend_pool is not None:
+        trend_islem = [t for t in trades if t["tip"] in ("TREND_AL", "TREND_SAT")]
+        print("-" * 56)
+        print(f"Trend havuzu son durum  : {trend_pool['position']} "
+              f"({trend_pool['qty_shib']:,.0f} {SYMBOL.replace('USDT', '')} / "
+              f"{trend_pool['qty_usdt']:,.2f} USDT), {len(trend_islem)} trend islemi")
     print("=" * 56)
 
     if token_degisim > 0:
@@ -177,8 +231,8 @@ def main():
     candles = fetch_history(SYMBOL, GRID_KLINE_INTERVAL, BACKTEST_DAYS)
     kapanislar = [float(c[4]) for c in candles]
     zamanlar = [c[0] for c in candles]
-    trades, equity_egrisi, coin_egrisi, baslangic_coin, acik_lot_sayisi = simulate(kapanislar, zamanlar)
-    ozet_yazdir(trades, equity_egrisi, coin_egrisi, baslangic_coin, acik_lot_sayisi, len(candles))
+    trades, equity_egrisi, coin_egrisi, baslangic_coin, acik_lot_sayisi, trend_pool = simulate(kapanislar, zamanlar)
+    ozet_yazdir(trades, equity_egrisi, coin_egrisi, baslangic_coin, acik_lot_sayisi, len(candles), trend_pool)
 
 
 if __name__ == "__main__":

@@ -77,6 +77,20 @@ GRID_TREND_FILTER_24H_PERCENT = float(os.environ.get("GRID_TREND_FILTER_24H_PERC
 GRID_TREND_CHECK_INTERVAL_SECONDS = int(os.environ.get("GRID_TREND_CHECK_INTERVAL_SECONDS", "300"))
 GRID_TREND_FILTER_ENABLED = GRID_TREND_FILTER_1H_PERCENT > -100 or GRID_TREND_FILTER_24H_PERCENT > -100
 
+# "Gunluk/saatlik trendi takip edip o payla islem yap" ozelligi: seed edilen
+# SHIB havuzunun (GRID_SEED_SHIB_PERCENT) bu yuzdesi, grid'den TAMAMEN AYRI,
+# kendi ic sayaçlarini (qty_shib/qty_usdt) tutan bagimsiz bir alt-havuza
+# ayrilir. Bu alt-havuz HESAP TOPLAM bakiyesini degil sadece kendi ic
+# sayaçlarini kullanir - ayni surec icinde calistigi icin grid ile
+# birbirlerinin parasina asla karismazlar (iki ayri bot calistirmanin
+# getirecegi bakiye çakışması riski yok). Basit trend mantigi: hem son 1
+# saatlik hem son 24 saatlik degisim ESIGIN USTUNDEYSE al (long), ikisinden
+# biri ESIGIN ALTINA duserse sat (flat). 0 = kapali (varsayilan).
+GRID_TREND_ALLOCATION_PERCENT = float(os.environ.get("GRID_TREND_ALLOCATION_PERCENT", "0"))
+GRID_TREND_ENTRY_PERCENT = float(os.environ.get("GRID_TREND_ENTRY_PERCENT", "0.3"))
+GRID_TREND_EXIT_PERCENT = float(os.environ.get("GRID_TREND_EXIT_PERCENT", "-0.3"))
+GRID_TREND_POOL_ENABLED = GRID_TREND_ALLOCATION_PERCENT > 0
+
 _trend_cache = {"checked_at": 0.0, "change_1h": 0.0, "change_24h": 0.0}
 
 
@@ -119,6 +133,7 @@ def load_state():
         "daily_realized_pnl": 0.0,
         "day_start_equity": None,
         "initial_equity": None,
+        "trend_pool": None,
     }
 
 
@@ -135,6 +150,7 @@ def normalize_state(state):
         "daily_realized_pnl": 0.0,
         "day_start_equity": None,
         "initial_equity": None,
+        "trend_pool": None,
     }
     for key, value in defaults.items():
         state.setdefault(key, value)
@@ -167,6 +183,68 @@ def check_mode_guard():
         raise SystemExit("GRID_SEED_SHIB_PERCENT 0-100 araliginda olmali.")
     if GRID_TREND_CHECK_INTERVAL_SECONDS < 1:
         raise SystemExit("GRID_TREND_CHECK_INTERVAL_SECONDS en az 1 olmali.")
+    if not 0 <= GRID_TREND_ALLOCATION_PERCENT <= 100:
+        raise SystemExit("GRID_TREND_ALLOCATION_PERCENT 0-100 araliginda olmali.")
+    if GRID_TREND_ALLOCATION_PERCENT > 0 and GRID_SEED_SHIB_PERCENT <= 0:
+        raise SystemExit(
+            "GRID_TREND_ALLOCATION_PERCENT kullanmak icin once GRID_SEED_SHIB_PERCENT > 0 olmali "
+            "(trend alt-havuzu, seed edilen SHIB payindan ayrilir)."
+        )
+
+
+def run_trend_pool(state, fiyat, zaman, trend):
+    """Grid'den bagimsiz, kendi ic sayaçlariyla (qty_shib/qty_usdt) calisan
+    trend takip alt-havuzu. Asla get_balance() ile hesap TOPLAM bakiyesini
+    okumaz - sadece kendi ic durumunu kullanir, boylece grid'in parasina
+    hic karismaz."""
+    pool = state["trend_pool"]
+    if pool["position"] == "long":
+        exit_tetik = (
+            trend["change_1h"] <= GRID_TREND_EXIT_PERCENT
+            or trend["change_24h"] <= GRID_TREND_EXIT_PERCENT
+        )
+        if not exit_tetik or pool["qty_shib"] <= 0:
+            return
+        if MODE == "dry_run":
+            notify(
+                f"📉 [SIMULE] {zaman} - Trend havuzu SATIS (1sa={trend['change_1h']:+.2f}% "
+                f"24sa={trend['change_24h']:+.2f}%): {pool['qty_shib']:,.0f} {BASE_ASSET} -> USDT (simule)"
+            )
+            pool["qty_usdt"] = pool["qty_shib"] * fiyat
+        else:
+            order = place_order("SELL", pool["qty_shib"], use_quote_qty=False)
+            alinan = float(order.get("cummulativeQuoteQty", pool["qty_shib"] * fiyat))
+            notify(
+                f"📉 [{MODE.upper()}] Trend havuzu SATIS (1sa={trend['change_1h']:+.2f}% "
+                f"24sa={trend['change_24h']:+.2f}%): {order}"
+            )
+            pool["qty_usdt"] = alinan
+        pool["qty_shib"] = 0.0
+        pool["position"] = "flat"
+    else:
+        entry_tetik = (
+            trend["change_1h"] >= GRID_TREND_ENTRY_PERCENT
+            and trend["change_24h"] >= GRID_TREND_ENTRY_PERCENT
+        )
+        if not entry_tetik or pool["qty_usdt"] <= 0:
+            return
+        if MODE == "dry_run":
+            notify(
+                f"📈 [SIMULE] {zaman} - Trend havuzu ALIM (1sa={trend['change_1h']:+.2f}% "
+                f"24sa={trend['change_24h']:+.2f}%): {pool['qty_usdt']:,.2f} {QUOTE_ASSET} -> {BASE_ASSET} (simule)"
+            )
+            pool["qty_shib"] = pool["qty_usdt"] / fiyat
+        else:
+            order = place_order("BUY", pool["qty_usdt"], use_quote_qty=True)
+            qty = float(order.get("executedQty", 0))
+            notify(
+                f"📈 [{MODE.upper()}] Trend havuzu ALIM (1sa={trend['change_1h']:+.2f}% "
+                f"24sa={trend['change_24h']:+.2f}%): {order}"
+            )
+            pool["qty_shib"] = qty
+        pool["qty_usdt"] = 0.0
+        pool["entry_price"] = fiyat
+        pool["position"] = "long"
 
 
 def run_once(state):
@@ -179,20 +257,35 @@ def run_once(state):
     if state["last_reference_price"] is None:
         state["last_reference_price"] = fiyat
         notify(f"{zaman} - Grid baslangic referans fiyati ayarlandi: {fiyat}")
-        if MODE != "dry_run" and GRID_SEED_SHIB_PERCENT > 0 and not state["open_lots"]:
+        if MODE != "dry_run" and GRID_SEED_SHIB_PERCENT > 0 and not state["open_lots"] and state.get("trend_pool") is None:
             coin_bakiye = get_balance(BASE_ASSET)
-            seed_qty = coin_bakiye * (GRID_SEED_SHIB_PERCENT / 100)
-            if seed_qty > 0:
+            seed_qty_toplam = coin_bakiye * (GRID_SEED_SHIB_PERCENT / 100)
+            trend_qty = seed_qty_toplam * (GRID_TREND_ALLOCATION_PERCENT / 100) if GRID_TREND_POOL_ENABLED else 0.0
+            grid_qty = seed_qty_toplam - trend_qty
+            if grid_qty > 0:
                 state["open_lots"].append({
-                    "qty": seed_qty,
+                    "qty": grid_qty,
                     "entry_price": fiyat,
-                    "quote_spent": seed_qty * fiyat,
+                    "quote_spent": grid_qty * fiyat,
                 })
                 notify(
                     f"🌱 Mevcut {BASE_ASSET} bakiyesinin %{GRID_SEED_SHIB_PERCENT:.0f}'i "
-                    f"({seed_qty:,.0f} {BASE_ASSET}) baslangic lotu olarak grid havuzuna "
-                    f"eklendi (giris fiyati={fiyat}, hedef=%{GRID_STEP_UP_PERCENT} yukarida "
-                    f"satis). Kalan bakiyeye bot hic dokunmaz."
+                    f"({seed_qty_toplam:,.0f} {BASE_ASSET}) ayrildi; bunun %{GRID_TREND_ALLOCATION_PERCENT:.0f}'i "
+                    f"trend havuzuna, kalani ({grid_qty:,.0f} {BASE_ASSET}) grid havuzuna baslangic "
+                    f"lotu olarak eklendi (giris fiyati={fiyat}, hedef=%{GRID_STEP_UP_PERCENT} yukarida "
+                    f"satis). Ayrilmayan bakiyeye bot hic dokunmaz."
+                )
+            if trend_qty > 0:
+                state["trend_pool"] = {
+                    "position": "long",
+                    "qty_shib": trend_qty,
+                    "qty_usdt": 0.0,
+                    "entry_price": fiyat,
+                }
+                notify(
+                    f"📈 Trend alt-havuzu olusturuldu: {trend_qty:,.0f} {BASE_ASSET} (giris fiyati={fiyat}). "
+                    f"Hem 1sa hem 24sa degisim >=%{GRID_TREND_ENTRY_PERCENT} ise SHIB'de kalir/alir, "
+                    f"ikisinden biri <=%{GRID_TREND_EXIT_PERCENT} olursa USDT'ye satar."
                 )
         save_state(state)
         return
@@ -203,11 +296,14 @@ def run_once(state):
         and state.get("daily_realized_pnl", 0) <= -state["day_start_equity"] * MAX_DAILY_LOSS_PERCENT / 100
     )
     al_tetik = fiyat <= state["last_reference_price"] * (1 - GRID_STEP_DOWN_PERCENT / 100)
-    trend = get_trend_context() if GRID_TREND_FILTER_ENABLED else None
-    trend_blocked = bool(trend) and (
+    trend_havuzu_aktif = state.get("trend_pool") is not None
+    trend = get_trend_context() if (GRID_TREND_FILTER_ENABLED or trend_havuzu_aktif) else None
+    trend_blocked = bool(trend) and GRID_TREND_FILTER_ENABLED and (
         (GRID_TREND_FILTER_1H_PERCENT > -100 and trend["change_1h"] <= GRID_TREND_FILTER_1H_PERCENT)
         or (GRID_TREND_FILTER_24H_PERCENT > -100 and trend["change_24h"] <= GRID_TREND_FILTER_24H_PERCENT)
     )
+    if trend_havuzu_aktif:
+        run_trend_pool(state, fiyat, zaman, trend)
 
     # Cikislar (kar hedefi / stop-loss) her zaman YENI alimdan ONCE kontrol
     # edilir - koruyucu bir satis, yeni bir pozisyon acmaktan daha oncelikli
@@ -312,6 +408,11 @@ def main():
         f"ise ALIM atlanir, her {GRID_TREND_CHECK_INTERVAL_SECONDS}sn kontrol)"
         if GRID_TREND_FILTER_ENABLED else ""
     )
+    if GRID_TREND_POOL_ENABLED:
+        trend_bilgisi += (
+            f" TREND_HAVUZU(seed'in %{GRID_TREND_ALLOCATION_PERCENT} - giris>=%{GRID_TREND_ENTRY_PERCENT} "
+            f"cikis<=%{GRID_TREND_EXIT_PERCENT})"
+        )
     notify(
         f"🤖 Grid botu basladi. MODE={MODE} SYMBOL={SYMBOL} "
         f"ADIM_ASAGI=%{GRID_STEP_DOWN_PERCENT} ADIM_YUKARI=%{GRID_STEP_UP_PERCENT} "

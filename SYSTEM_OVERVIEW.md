@@ -348,6 +348,28 @@ Sentetik veriyle (düz fiyat + ani %10 düşüş) filtrenin doğru çalıştığ
 doğrulandı: filtre açıkken alım engellendi, kapalıyken (varsayılan) normal
 şekilde alım yapıldı.
 
+**Trend takip alt-havuzu eklendi (`GRID_TREND_ALLOCATION_PERCENT`, 05.09.2026):**
+Kullanıcı, trend filtresinin token adedini kötüleştirdiğini gördükten sonra
+yine de "günlük/saatlik trendi takip etsin, ama sadece ayırdığımız (seed
+edilen %50) bakiyenin yarısıyla" istedi (yani toplamın %25'i). Bunu güvenli
+şekilde uygulamak için grid'den TAMAMEN AYRI, kendi iç sayaçlarını
+(`qty_shib`/`qty_usdt`) tutan bağımsız bir alt-havuz eklendi — `get_balance()`
+ile hesap TOPLAM bakiyesini hiç okumuyor, böylece aynı hesapta grid ile aynı
+anda çalışırken birbirlerinin parasına karışma riski yok (iki ayrı bot
+çalıştırmanın getireceği "kim ne kadar harcadı" çakışması engellendi, tek
+süreç içinde tek state dosyasıyla yönetiliyor). Mantık: hem son 1 saatlik hem
+son 24 saatlik değişim `GRID_TREND_ENTRY_PERCENT`'in üstündeyse SHIB'de
+kalır/alır; ikisinden biri `GRID_TREND_EXIT_PERCENT`'in altına düşerse
+USDT'ye satar. Sentetik veriyle (düz fiyat + 1 saatlik keskin düşüş + 1
+saatlik keskin yükseliş) doğru çalıştığı doğrulandı: düşüşte doğru anda
+sattı, yükselişte doğru anda geri aldı, grid'in kendi lotlarına hiç
+dokunmadı. `grid_backtest.py`'ye de birebir aynı mantık eklendi (canlıya
+almadan önce kullanıcının kendi PC'sinde gerçek veriyle test etmesi için).
+**Uyarı kullanıcıya iletildi:** daha önceki trend filtresi testi (bkz. yukarı)
+zaten trend-takip mantığının bu tarihsel pencerede saf grid'den kötü
+performans gösterdiğini kanıtladı; bu alt-havuz da muhtemelen aynı zayıflığı
+taşıyacak, sadece etkisi sınırlı bir paya (%25) hapsedilmiş oluyor.
+
 ## Bilinen sınırlamalar / dürüst notlar
 
 - Çoklu coin takibi, işlem geçmişi/performans dashboard'u gibi genişletmeler
