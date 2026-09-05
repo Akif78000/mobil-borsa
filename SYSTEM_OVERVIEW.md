@@ -332,6 +332,22 @@ fiyattan tek seferlik bir "başlangıç lotu" olarak `open_lots`'a kaydediliyor
 alabiliyor. Bu, kullanıcının 3 yıldır tuttuğu pozisyonun bir kısmını aktif
 riske sokan bilinçli bir tercih; geri kalan yarı kalıcı olarak dokunulmaz.
 
+**Saatlik/günlük trend filtresi eklendi (`GRID_TREND_FILTER_1H_PERCENT` /
+`GRID_TREND_FILTER_24H_PERCENT`, 05.09.2026):** Kullanıcı "%1 grid adımı
+kalsın ama saatlik/günlük değişimi de göz önünde bulundurup ona göre işlem
+yapsın" istedi. Tam bir rejim-değiştirme (adaptive_bot.py gibi) yerine, daha
+dar kapsamlı bir "düşen bıçağı yakalama" koruması eklendi: son 1 saatlik veya
+son 24 saatlik değişim, kullanıcının belirlediği eşiğin altındaysa (güçlü
+düşüşteyse) o döngüde **sadece yeni ALIM** atlanıyor; kâr hedefine ulaşan
+lotların SATIŞ'ı bu filtreden hiç etkilenmiyor. Varsayılan `-100` ile filtre
+tamamen kapalı (eski davranış). `grid_backtest.py`'ye de aynı mantık eklendi
+(mum dizisinde sabit aralık aritmetiğiyle 1sa/24sa öncesine bakarak) — canlıya
+almadan önce kullanıcının kendi PC'sinde backtest ile eşik değerlerini
+(örn. `GRID_TREND_FILTER_24H_PERCENT=-5`) test edip karşılaştırması bekleniyor.
+Sentetik veriyle (düz fiyat + ani %10 düşüş) filtrenin doğru çalıştığı
+doğrulandı: filtre açıkken alım engellendi, kapalıyken (varsayılan) normal
+şekilde alım yapıldı.
+
 ## Bilinen sınırlamalar / dürüst notlar
 
 - Çoklu coin takibi, işlem geçmişi/performans dashboard'u gibi genişletmeler

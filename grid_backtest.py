@@ -36,6 +36,10 @@ GRID_RESERVE_PERCENT = float(os.environ.get("GRID_RESERVE_PERCENT", "20"))
 GRID_LOT_STOP_PERCENT = float(os.environ.get("GRID_LOT_STOP_PERCENT", "10"))
 TRADING_FEE_PERCENT = float(os.environ.get("TRADING_FEE_PERCENT", "0.1"))
 START_IN_SHIB = os.environ.get("START_IN_SHIB", "false").lower() in ("1", "true", "evet")
+# grid_bot.py'deki trend filtresinin backtest karsiligi - bkz. o dosyadaki
+# aciklama. Sadece ALIM'i etkiler, SATIS mantigina hic dokunmaz.
+GRID_TREND_FILTER_1H_PERCENT = float(os.environ.get("GRID_TREND_FILTER_1H_PERCENT", "-100"))
+GRID_TREND_FILTER_24H_PERCENT = float(os.environ.get("GRID_TREND_FILTER_24H_PERCENT", "-100"))
 
 
 def simulate(kapanislar, zamanlar):
@@ -59,12 +63,20 @@ def simulate(kapanislar, zamanlar):
     equity_egrisi = []
     coin_egrisi = []
     rezerv = BACKTEST_START_CAPITAL * (GRID_RESERVE_PERCENT / 100)
+    candles_per_hour = max(1, round(3_600_000 / INTERVAL_MS[GRID_KLINE_INTERVAL]))
+    candles_per_day = max(1, round(86_400_000 / INTERVAL_MS[GRID_KLINE_INTERVAL]))
 
     for i, fiyat in enumerate(kapanislar):
         tarih = time.strftime("%Y-%m-%d %H:%M", time.localtime(zamanlar[i] / 1000))
 
         al_tetik = fiyat <= referans_fiyat * (1 - GRID_STEP_DOWN_PERCENT / 100)
         harcanacak = usdt * (GRID_ORDER_PERCENT / 100)
+        change_1h = (fiyat / kapanislar[i - candles_per_hour] - 1) * 100 if i >= candles_per_hour else None
+        change_24h = (fiyat / kapanislar[i - candles_per_day] - 1) * 100 if i >= candles_per_day else None
+        trend_blocked = (
+            (GRID_TREND_FILTER_1H_PERCENT > -100 and change_1h is not None and change_1h <= GRID_TREND_FILTER_1H_PERCENT)
+            or (GRID_TREND_FILTER_24H_PERCENT > -100 and change_24h is not None and change_24h <= GRID_TREND_FILTER_24H_PERCENT)
+        )
 
         # Cikislar (kar hedefi/stop-loss) her zaman yeni alimdan ONCE kontrol
         # edilir - koruyucu satis, yeni pozisyon acmaktan daha oncelikli olmali.
@@ -88,7 +100,7 @@ def simulate(kapanislar, zamanlar):
                 satis_yapildi = True
                 break  # bu adimda en fazla bir islem, backtest.py ile ayni sadelik ilkesi
 
-        if not satis_yapildi and al_tetik and len(open_lots) < GRID_MAX_OPEN_LOTS and harcanacak > 0 and (usdt - harcanacak) >= rezerv:
+        if not satis_yapildi and al_tetik and len(open_lots) < GRID_MAX_OPEN_LOTS and harcanacak > 0 and (usdt - harcanacak) >= rezerv and not trend_blocked:
             alim_ucreti = harcanacak * TRADING_FEE_PERCENT / 100
             qty = (harcanacak - alim_ucreti) / fiyat
             usdt -= harcanacak
@@ -128,6 +140,8 @@ def ozet_yazdir(trades, equity_egrisi, coin_egrisi, baslangic_coin, acik_lot_say
     print(f"GRID BACKTEST: {SYMBOL} {GRID_KLINE_INTERVAL} - son {BACKTEST_DAYS} gun ({mum_sayisi} mum)")
     print(f"ADIM: asagi=%{GRID_STEP_DOWN_PERCENT} yukari=%{GRID_STEP_UP_PERCENT} "
           f"siparis=%{GRID_ORDER_PERCENT} maks_lot={GRID_MAX_OPEN_LOTS} rezerv=%{GRID_RESERVE_PERCENT}")
+    if GRID_TREND_FILTER_1H_PERCENT > -100 or GRID_TREND_FILTER_24H_PERCENT > -100:
+        print(f"TREND FILTRE: 1sa<=%{GRID_TREND_FILTER_1H_PERCENT} veya 24sa<=%{GRID_TREND_FILTER_24H_PERCENT} ise ALIM atlanir")
     print("=" * 56)
     print(f"Baslangic sermaye      : {BACKTEST_START_CAPITAL:,.2f} USDT")
     print(f"Bitis degeri            : {toplam_deger:,.2f} USDT")

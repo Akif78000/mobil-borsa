@@ -66,11 +66,46 @@ CONFIRM_REAL_MONEY = os.environ.get("CONFIRM_REAL_MONEY", "")
 # kalan yuzde bota hic tanitilmaz, asla satilmaz. 0 = kapali (varsayilan,
 # eski davranis - bot sadece USDT ile alim yaparak baslar).
 GRID_SEED_SHIB_PERCENT = float(os.environ.get("GRID_SEED_SHIB_PERCENT", "0"))
+# Grid'in %1 adimina DOKUNMADAN, sadece YENI ALIM sinyaline saatlik/gunluk
+# trend filtresi eklemek icin: son 1 saatlik veya son 24 saatlik degisim bu
+# esiklerin ALTINDAYSA (guclu dususteyse), o dongude yeni alim atlanir -
+# "dusen bicagi yakalama" riskini azaltir. SATIS (kar hedefi/stop-loss) bu
+# filtreden HIC etkilenmez, her zaman aynen calisir. -100 = kapali
+# (varsayilan, eski davranis, hicbir zaman engellemez).
+GRID_TREND_FILTER_1H_PERCENT = float(os.environ.get("GRID_TREND_FILTER_1H_PERCENT", "-100"))
+GRID_TREND_FILTER_24H_PERCENT = float(os.environ.get("GRID_TREND_FILTER_24H_PERCENT", "-100"))
+GRID_TREND_CHECK_INTERVAL_SECONDS = int(os.environ.get("GRID_TREND_CHECK_INTERVAL_SECONDS", "300"))
+GRID_TREND_FILTER_ENABLED = GRID_TREND_FILTER_1H_PERCENT > -100 or GRID_TREND_FILTER_24H_PERCENT > -100
+
+_trend_cache = {"checked_at": 0.0, "change_1h": 0.0, "change_24h": 0.0}
 
 
 def get_price():
     data = _http("GET", "/api/v3/ticker/price", {"symbol": SYMBOL}, base=MAINNET_BASE)
     return float(data["price"])
+
+
+def get_trend_context():
+    now = time.time()
+    if now - _trend_cache["checked_at"] < GRID_TREND_CHECK_INTERVAL_SECONDS:
+        return _trend_cache
+    try:
+        gunluk = _http("GET", "/api/v3/ticker/24hr", {"symbol": SYMBOL}, base=MAINNET_BASE)
+        change_24h = float(gunluk["priceChangePercent"])
+        saatlik = _http(
+            "GET", "/api/v3/klines",
+            {"symbol": SYMBOL, "interval": "1h", "limit": 2},
+            base=MAINNET_BASE,
+        )
+        change_1h = (
+            (float(saatlik[-1][4]) / float(saatlik[-2][4]) - 1) * 100
+            if len(saatlik) >= 2 else 0.0
+        )
+        _trend_cache.update(checked_at=now, change_1h=change_1h, change_24h=change_24h)
+    except Exception as e:
+        notify(f"⚠️ Trend filtresi kontrolu basarisiz, bu turda filtre devre disi: {e}")
+        _trend_cache["checked_at"] = now
+    return _trend_cache
 
 
 def load_state():
@@ -130,6 +165,8 @@ def check_mode_guard():
         raise SystemExit("GRID_RESERVE_PERCENT 0-100 araliginda olmali.")
     if not 0 <= GRID_SEED_SHIB_PERCENT <= 100:
         raise SystemExit("GRID_SEED_SHIB_PERCENT 0-100 araliginda olmali.")
+    if GRID_TREND_CHECK_INTERVAL_SECONDS < 1:
+        raise SystemExit("GRID_TREND_CHECK_INTERVAL_SECONDS en az 1 olmali.")
 
 
 def run_once(state):
@@ -166,6 +203,11 @@ def run_once(state):
         and state.get("daily_realized_pnl", 0) <= -state["day_start_equity"] * MAX_DAILY_LOSS_PERCENT / 100
     )
     al_tetik = fiyat <= state["last_reference_price"] * (1 - GRID_STEP_DOWN_PERCENT / 100)
+    trend = get_trend_context() if GRID_TREND_FILTER_ENABLED else None
+    trend_blocked = bool(trend) and (
+        (GRID_TREND_FILTER_1H_PERCENT > -100 and trend["change_1h"] <= GRID_TREND_FILTER_1H_PERCENT)
+        or (GRID_TREND_FILTER_24H_PERCENT > -100 and trend["change_24h"] <= GRID_TREND_FILTER_24H_PERCENT)
+    )
 
     # Cikislar (kar hedefi / stop-loss) her zaman YENI alimdan ONCE kontrol
     # edilir - koruyucu bir satis, yeni bir pozisyon acmaktan daha oncelikli
@@ -207,6 +249,13 @@ def run_once(state):
         return  # tek dongude en fazla bir islem - basit ve ongorulebilir tutmak icin
 
     if al_tetik and acik_lot_sayisi < GRID_MAX_OPEN_LOTS and not gunluk_limit:
+        if trend_blocked:
+            print(
+                f"{zaman} - {SYMBOL} fiyat={fiyat} -> ALIM ATLANDI (trend filtresi: "
+                f"1sa={trend['change_1h']:+.2f}% 24sa={trend['change_24h']:+.2f}%)."
+            )
+            save_state(state)
+            return
         if MODE == "dry_run":
             notify(
                 f"🟢 [SIMULE] {zaman} - {SYMBOL} fiyat={fiyat} referans={state['last_reference_price']} "
@@ -258,11 +307,16 @@ def run_once(state):
 
 def main():
     check_mode_guard()
+    trend_bilgisi = (
+        f" TREND_FILTRE(1sa<=%{GRID_TREND_FILTER_1H_PERCENT} veya 24sa<=%{GRID_TREND_FILTER_24H_PERCENT} "
+        f"ise ALIM atlanir, her {GRID_TREND_CHECK_INTERVAL_SECONDS}sn kontrol)"
+        if GRID_TREND_FILTER_ENABLED else ""
+    )
     notify(
         f"🤖 Grid botu basladi. MODE={MODE} SYMBOL={SYMBOL} "
         f"ADIM_ASAGI=%{GRID_STEP_DOWN_PERCENT} ADIM_YUKARI=%{GRID_STEP_UP_PERCENT} "
         f"SIPARIS=%{GRID_ORDER_PERCENT} MAKS_LOT={GRID_MAX_OPEN_LOTS} "
-        f"REZERV=%{GRID_RESERVE_PERCENT} POLL={GRID_POLL_INTERVAL_SECONDS}s"
+        f"REZERV=%{GRID_RESERVE_PERCENT} POLL={GRID_POLL_INTERVAL_SECONDS}s{trend_bilgisi}"
     )
     state = normalize_state(load_state())
     while True:
