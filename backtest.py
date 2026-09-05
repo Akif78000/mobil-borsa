@@ -65,45 +65,113 @@ INTERVAL_MS = {
 }
 
 
-def _fetch_klines_batch(url, deneme_sayisi=4):
-    """Binance zaman zaman yavas/timeout verebiliyor (uzun BACKTEST_DAYS'te
-    yuzlerce sayfalama istegi var - biri patlarsa TUM script cokup o ana
-    kadarki isi bosa cikarmasin diye ustel gecikmeli (2sn,4sn,8sn,16sn)
-    yeniden deneme eklendi)."""
+# --- Veri cekme dayanikliligi -----------------------------------------
+# Uzun BACKTEST_DAYS'te (orn. hybrid_backtest.py'nin 180 gunluk kosumu)
+# yuzlerce sayfalama istegi var; Binance ara sira yavas/timeout verebiliyor
+# veya rate-limit (429) donebiliyor. Asagidaki katman SADECE bunun icin -
+# hicbir gosterge/strateji/sinyal mantigina dokunmaz, sadece AYNI veriyi
+# daha guvenilir sekilde ceker.
+FETCH_TIMEOUT_SECONDS = float(os.environ.get("FETCH_TIMEOUT_SECONDS", "30"))
+FETCH_MAX_RETRIES = int(os.environ.get("FETCH_MAX_RETRIES", "5"))
+FETCH_RETRY_DELAYS = [2, 4, 8, 16, 30]  # sirayla kullanilir, bittiginde son deger tekrarlanir
+FETCH_RATE_LIMIT_SECONDS = float(os.environ.get("FETCH_RATE_LIMIT_SECONDS", "0.15"))
+
+# Ayni Python sureci icinde (orn. hybrid_backtest.py'nin TEK CALISTIRMASINDA
+# GRID + EMA + SUPERTREND + KAMA + HYBRID) ayni symbol+interval+gun penceresi
+# BIRDEN FAZLA kez istenebiliyor (orn. uc dedektor de SHIB+majors'in ayni
+# 1sa/4sa/1gun verisini ayri ayri cekiyordu). Bellek-ici (surec omrunce
+# gecerli, diske yazilmaz) basit bir onbellek bunu tekrar tekrar Binance'ten
+# indirmeyi onler - veri ICERIGINI DEGISTIRMEZ, sadece tekrar kullanir.
+_KLINES_CACHE = {}
+
+
+def _gecikme(deneme_no):
+    idx = min(deneme_no - 1, len(FETCH_RETRY_DELAYS) - 1)
+    return FETCH_RETRY_DELAYS[idx]
+
+
+def _fetch_klines_batch(symbol, interval, url, max_retries=None):
+    """Tek bir sayfalama istegini guvenli sekilde ceker:
+      - timeout=FETCH_TIMEOUT_SECONDS, en fazla max_retries deneme.
+      - TimeoutError / URLError / gecici OSError -> ustel gecikmeyle (2,4,8,
+        16,30sn) tekrar dener.
+      - HTTP 429/418 (rate limit) veya 5xx (Binance tarafi gecici sorun) ->
+        ayni sekilde tekrar dener; 429/418'de sunucunun Retry-After basligi
+        varsa ONU kullanir (yoksa normal gecikme takvimine duser).
+      - TUM denemeler tukenirse: sessizce devam ETMEZ, hangi symbol/interval
+        icin basarisiz oldugunu acikca yazip HATAYI YUKARI FIRLATIR - cagiran
+        (fetch_history) bunu yakalayip backtest'i DURDURUR (eksik/hayali veri
+        ile sonuc uretilmez)."""
+    max_retries = max_retries or FETCH_MAX_RETRIES
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    gecikme = 2
-    for deneme in range(1, deneme_sayisi + 1):
+    for deneme in range(1, max_retries + 1):
+        print(f"[DATA] {symbol} {interval} deneniyor {deneme}/{max_retries}...")
         try:
-            with urllib.request.urlopen(req, context=_CTX, timeout=20) as resp:
+            with urllib.request.urlopen(req, context=_CTX, timeout=FETCH_TIMEOUT_SECONDS) as resp:
                 return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            son_deneme = deneme == max_retries
+            if e.code in (429, 418) or 500 <= e.code < 600:
+                retry_after = e.headers.get("Retry-After") if e.headers else None
+                bekleme = float(retry_after) if retry_after else _gecikme(deneme)
+                sebep = f"HTTP {e.code}" + (" (rate limit)" if e.code in (429, 418) else " (Binance tarafi gecici hata)")
+                if son_deneme:
+                    print(f"[DATA] HATA: {symbol} {interval} - {sebep} - tum {max_retries} deneme tukendi.")
+                    raise
+                print(f"[DATA] {sebep} - {bekleme:.0f} saniye sonra tekrar denenecek")
+                time.sleep(bekleme)
+                continue
+            print(f"[DATA] HATA: {symbol} {interval} - HTTP {e.code} (tekrar denenmeyecek turden bir hata) - {e}")
+            raise
         except (urllib.error.URLError, TimeoutError, OSError) as e:
-            if deneme == deneme_sayisi:
+            son_deneme = deneme == max_retries
+            if son_deneme:
+                print(f"[DATA] HATA: {symbol} {interval} - {e} - tum {max_retries} deneme tukendi.")
                 raise
-            print(f"  (Binance istegi basarisiz - {e}; {gecikme}sn sonra {deneme + 1}. deneme...)")
-            time.sleep(gecikme)
-            gecikme *= 2
+            bekleme = _gecikme(deneme)
+            print(f"[DATA] timeout/baglanti hatasi ({e}) - {bekleme} saniye sonra tekrar denenecek")
+            time.sleep(bekleme)
 
 
 def fetch_history(symbol, interval, days):
     if interval not in INTERVAL_MS:
         raise SystemExit(f"Desteklenmeyen KLINE_INTERVAL: {interval}")
+
+    cache_key = (symbol, interval, days)
+    if cache_key in _KLINES_CACHE:
+        cached = _KLINES_CACHE[cache_key]
+        print(f"[DATA] {symbol} {interval} (son {days} gun) onbellekten kullanildi: {len(cached)} mum")
+        return cached
+
     end_time = int(time.time() * 1000)
     start_time = end_time - days * 86_400_000
     candles = []
     cursor = end_time
-    while cursor > start_time:
-        params = {"symbol": symbol, "interval": interval, "limit": 1000, "endTime": cursor}
-        url = f"{MAINNET_BASE}/api/v3/klines?{urllib.parse.urlencode(params)}"
-        batch = _fetch_klines_batch(url)
-        if not batch:
-            break
-        candles = batch + candles
-        first_open_time = batch[0][0]
-        if first_open_time <= start_time:
-            break
-        cursor = first_open_time - 1
-        time.sleep(0.2)
-    return [c for c in candles if c[0] >= start_time]
+    try:
+        while cursor > start_time:
+            params = {"symbol": symbol, "interval": interval, "limit": 1000, "endTime": cursor}
+            url = f"{MAINNET_BASE}/api/v3/klines?{urllib.parse.urlencode(params)}"
+            batch = _fetch_klines_batch(symbol, interval, url)
+            if not batch:
+                break
+            candles = batch + candles
+            first_open_time = batch[0][0]
+            if first_open_time <= start_time:
+                break
+            cursor = first_open_time - 1
+            time.sleep(FETCH_RATE_LIMIT_SECONDS)
+    except Exception:
+        # Kismi/eksik veriyle SESSIZCE devam ETMEK yerine (bu yanlis backtest
+        # sonucu uretir) burada durup hatayi cagirana iletiyoruz. Ne kadarlik
+        # veri toplanabildigi bilgi amacli yazilir, KULLANILMAZ.
+        print(f"[DATA] {symbol} {interval}: sadece {len(candles)} mum toplanabilmisti, "
+              f"veri cekme BASARISIZ oldu - backtest durduruluyor.")
+        raise
+
+    sonuc = [c for c in candles if c[0] >= start_time]
+    print(f"[DATA] {symbol} {interval} tamamlandi: {len(sonuc)} mum")
+    _KLINES_CACHE[cache_key] = sonuc
+    return sonuc
 
 
 def compute_ema_series(fiyatlar, periyot):
