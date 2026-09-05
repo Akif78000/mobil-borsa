@@ -23,6 +23,7 @@ import json
 import os
 import ssl
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -64,6 +65,25 @@ INTERVAL_MS = {
 }
 
 
+def _fetch_klines_batch(url, deneme_sayisi=4):
+    """Binance zaman zaman yavas/timeout verebiliyor (uzun BACKTEST_DAYS'te
+    yuzlerce sayfalama istegi var - biri patlarsa TUM script cokup o ana
+    kadarki isi bosa cikarmasin diye ustel gecikmeli (2sn,4sn,8sn,16sn)
+    yeniden deneme eklendi)."""
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    gecikme = 2
+    for deneme in range(1, deneme_sayisi + 1):
+        try:
+            with urllib.request.urlopen(req, context=_CTX, timeout=20) as resp:
+                return json.loads(resp.read().decode())
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            if deneme == deneme_sayisi:
+                raise
+            print(f"  (Binance istegi basarisiz - {e}; {gecikme}sn sonra {deneme + 1}. deneme...)")
+            time.sleep(gecikme)
+            gecikme *= 2
+
+
 def fetch_history(symbol, interval, days):
     if interval not in INTERVAL_MS:
         raise SystemExit(f"Desteklenmeyen KLINE_INTERVAL: {interval}")
@@ -74,9 +94,7 @@ def fetch_history(symbol, interval, days):
     while cursor > start_time:
         params = {"symbol": symbol, "interval": interval, "limit": 1000, "endTime": cursor}
         url = f"{MAINNET_BASE}/api/v3/klines?{urllib.parse.urlencode(params)}"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, context=_CTX, timeout=15) as resp:
-            batch = json.loads(resp.read().decode())
+        batch = _fetch_klines_batch(url)
         if not batch:
             break
         candles = batch + candles
