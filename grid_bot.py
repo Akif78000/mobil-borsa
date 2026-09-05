@@ -95,6 +95,21 @@ GRID_TREND_ENTRY_PERCENT = float(os.environ.get("GRID_TREND_ENTRY_PERCENT", "1")
 GRID_TREND_EXIT_PERCENT = float(os.environ.get("GRID_TREND_EXIT_PERCENT", "-1"))
 GRID_TREND_POOL_ENABLED = GRID_TREND_ALLOCATION_PERCENT > 0
 
+# Trend takibi (yukarida) tutarli sekilde saf gridden kotu ciktigi icin
+# kanitlanmis alternatif: ayni grid mantiginin (fiyat %X dusunce al, o lotun
+# girisinden %X yukselince sat) daha GENIS adimli ikinci bir katmani. Trend
+# tahmini yok - sadece daha buyuk fiyat sicramalarini da yakalamak icin
+# seed edilen havuzun bir kismi bu genis adimla, kendi ic sayaçlarini tutan
+# bagimsiz bir alt-havuzda calisir (ana %1 grid'in parasina karismaz). 0 =
+# kapali (varsayilan).
+GRID_WIDE_ALLOCATION_PERCENT = float(os.environ.get("GRID_WIDE_ALLOCATION_PERCENT", "0"))
+GRID_WIDE_STEP_DOWN_PERCENT = float(os.environ.get("GRID_WIDE_STEP_DOWN_PERCENT", "5"))
+GRID_WIDE_STEP_UP_PERCENT = float(os.environ.get("GRID_WIDE_STEP_UP_PERCENT", "5"))
+GRID_WIDE_LOT_STOP_PERCENT = float(os.environ.get("GRID_WIDE_LOT_STOP_PERCENT", "10"))
+GRID_WIDE_ORDER_PERCENT = float(os.environ.get("GRID_WIDE_ORDER_PERCENT", "10"))
+GRID_WIDE_MAX_OPEN_LOTS = int(os.environ.get("GRID_WIDE_MAX_OPEN_LOTS", "8"))
+GRID_WIDE_POOL_ENABLED = GRID_WIDE_ALLOCATION_PERCENT > 0
+
 _trend_cache = {"checked_at": 0.0, "change_1h": 0.0, "change_24h": 0.0}
 
 
@@ -138,6 +153,7 @@ def load_state():
         "day_start_equity": None,
         "initial_equity": None,
         "trend_pool": None,
+        "wide_pool": None,
     }
 
 
@@ -155,6 +171,7 @@ def normalize_state(state):
         "day_start_equity": None,
         "initial_equity": None,
         "trend_pool": None,
+        "wide_pool": None,
     }
     for key, value in defaults.items():
         state.setdefault(key, value)
@@ -194,6 +211,22 @@ def check_mode_guard():
             "GRID_TREND_ALLOCATION_PERCENT kullanmak icin once GRID_SEED_SHIB_PERCENT > 0 olmali "
             "(trend alt-havuzu, seed edilen SHIB payindan ayrilir)."
         )
+    if not 0 <= GRID_WIDE_ALLOCATION_PERCENT <= 100:
+        raise SystemExit("GRID_WIDE_ALLOCATION_PERCENT 0-100 araliginda olmali.")
+    if GRID_WIDE_ALLOCATION_PERCENT > 0 and GRID_SEED_SHIB_PERCENT <= 0:
+        raise SystemExit(
+            "GRID_WIDE_ALLOCATION_PERCENT kullanmak icin once GRID_SEED_SHIB_PERCENT > 0 olmali "
+            "(genis grid alt-havuzu, seed edilen SHIB payindan ayrilir)."
+        )
+    if GRID_TREND_ALLOCATION_PERCENT + GRID_WIDE_ALLOCATION_PERCENT > 100:
+        raise SystemExit(
+            "GRID_TREND_ALLOCATION_PERCENT + GRID_WIDE_ALLOCATION_PERCENT toplami 100'u gecemez "
+            "(ikisi de seed edilen ayni havuzdan pay alir)."
+        )
+    if GRID_WIDE_MAX_OPEN_LOTS < 1:
+        raise SystemExit("GRID_WIDE_MAX_OPEN_LOTS en az 1 olmali.")
+    if not 0 < GRID_WIDE_ORDER_PERCENT <= 33:
+        raise SystemExit("GRID_WIDE_ORDER_PERCENT guvenlik nedeniyle 0-33 araliginda olmali.")
 
 
 def run_trend_pool(state, fiyat, zaman, trend):
@@ -251,6 +284,65 @@ def run_trend_pool(state, fiyat, zaman, trend):
         pool["position"] = "long"
 
 
+def run_wide_pool(state, fiyat, zaman):
+    """Ana %1 grid ile AYNI mantigi (fiyat %X dusunce al, lotun girisinden
+    %X yukselince sat) ama GENIS adimla (GRID_WIDE_STEP_*) calistiran ikinci
+    bir grid katmani. Kendi ic sayaçlarini (open_lots/qty_usdt) tutar, ana
+    grid'in open_lots'una veya bakiyesine hic dokunmaz."""
+    pool = state["wide_pool"]
+
+    for lot in sorted(pool["open_lots"], key=lambda l: l["entry_price"]):
+        hedef = lot["entry_price"] * (1 + GRID_WIDE_STEP_UP_PERCENT / 100)
+        stop_seviyesi = lot["entry_price"] * (1 - GRID_WIDE_LOT_STOP_PERCENT / 100)
+        kar_hedefi_tetiklendi = fiyat >= hedef
+        stop_tetiklendi = fiyat <= stop_seviyesi
+        if not (kar_hedefi_tetiklendi or stop_tetiklendi):
+            continue
+        sebep = "kar hedefi" if kar_hedefi_tetiklendi else "stop-loss"
+        if MODE == "dry_run":
+            notify(
+                f"🔴📐 [SIMULE] {zaman} - Genis grid SATIS ({sebep}) giris={lot['entry_price']:.10f} "
+                f"fiyat={fiyat}: {lot['qty']:,.0f} {BASE_ASSET} (simule)"
+            )
+            pool["qty_usdt"] += lot["qty"] * fiyat
+        else:
+            order = place_order("SELL", lot["qty"], use_quote_qty=False)
+            alinan = float(order.get("cummulativeQuoteQty", lot["qty"] * fiyat))
+            notify(
+                f"🔴📐 [{MODE.upper()}] Genis grid SATIS ({sebep}, giris={lot['entry_price']:.10f} "
+                f"fiyat={fiyat}): {order}"
+            )
+            pool["qty_usdt"] += alinan
+        pool["open_lots"].remove(lot)
+        pool["reference_price"] = fiyat
+        return
+
+    al_tetik = fiyat <= pool["reference_price"] * (1 - GRID_WIDE_STEP_DOWN_PERCENT / 100)
+    if not (al_tetik and len(pool["open_lots"]) < GRID_WIDE_MAX_OPEN_LOTS):
+        return
+    harcanacak = pool["qty_usdt"] * (GRID_WIDE_ORDER_PERCENT / 100)
+    if harcanacak <= 0:
+        return
+    if MODE == "dry_run":
+        qty = harcanacak / fiyat
+        notify(
+            f"🟢📐 [SIMULE] {zaman} - Genis grid ALIM (lot {len(pool['open_lots']) + 1}/"
+            f"{GRID_WIDE_MAX_OPEN_LOTS}, fiyat={fiyat}): {harcanacak:,.2f} {QUOTE_ASSET} (simule)"
+        )
+        spent = harcanacak
+    else:
+        order = place_order("BUY", harcanacak, use_quote_qty=True)
+        qty = float(order.get("executedQty", 0))
+        spent = float(order.get("cummulativeQuoteQty", harcanacak))
+        notify(
+            f"🟢📐 [{MODE.upper()}] Genis grid ALIM (lot {len(pool['open_lots']) + 1}/"
+            f"{GRID_WIDE_MAX_OPEN_LOTS}, fiyat={fiyat}): {order}"
+        )
+    pool["qty_usdt"] -= spent
+    pool["open_lots"].append({"qty": qty, "entry_price": (spent / qty) if qty else fiyat, "quote_spent": spent})
+    pool["reference_price"] = fiyat
+
+
 def run_once(state):
     if os.path.exists(EMERGENCY_STOP_FILE):
         raise SystemExit(f"Acil durdurma dosyasi bulundu: {EMERGENCY_STOP_FILE}")
@@ -261,11 +353,15 @@ def run_once(state):
     if state["last_reference_price"] is None:
         state["last_reference_price"] = fiyat
         notify(f"{zaman} - Grid baslangic referans fiyati ayarlandi: {fiyat}")
-        if MODE != "dry_run" and GRID_SEED_SHIB_PERCENT > 0 and not state["open_lots"] and state.get("trend_pool") is None:
+        if (
+            MODE != "dry_run" and GRID_SEED_SHIB_PERCENT > 0 and not state["open_lots"]
+            and state.get("trend_pool") is None and state.get("wide_pool") is None
+        ):
             coin_bakiye = get_balance(BASE_ASSET)
             seed_qty_toplam = coin_bakiye * (GRID_SEED_SHIB_PERCENT / 100)
             trend_qty = seed_qty_toplam * (GRID_TREND_ALLOCATION_PERCENT / 100) if GRID_TREND_POOL_ENABLED else 0.0
-            grid_qty = seed_qty_toplam - trend_qty
+            wide_qty = seed_qty_toplam * (GRID_WIDE_ALLOCATION_PERCENT / 100) if GRID_WIDE_POOL_ENABLED else 0.0
+            grid_qty = seed_qty_toplam - trend_qty - wide_qty
             if grid_qty > 0:
                 state["open_lots"].append({
                     "qty": grid_qty,
@@ -274,10 +370,10 @@ def run_once(state):
                 })
                 notify(
                     f"🌱 Mevcut {BASE_ASSET} bakiyesinin %{GRID_SEED_SHIB_PERCENT:.0f}'i "
-                    f"({seed_qty_toplam:,.0f} {BASE_ASSET}) ayrildi; bunun %{GRID_TREND_ALLOCATION_PERCENT:.0f}'i "
-                    f"trend havuzuna, kalani ({grid_qty:,.0f} {BASE_ASSET}) grid havuzuna baslangic "
-                    f"lotu olarak eklendi (giris fiyati={fiyat}, hedef=%{GRID_STEP_UP_PERCENT} yukarida "
-                    f"satis). Ayrilmayan bakiyeye bot hic dokunmaz."
+                    f"({seed_qty_toplam:,.0f} {BASE_ASSET}) ayrildi; %{GRID_TREND_ALLOCATION_PERCENT:.0f}'i "
+                    f"trend havuzuna, %{GRID_WIDE_ALLOCATION_PERCENT:.0f}'i genis grid havuzuna, kalani "
+                    f"({grid_qty:,.0f} {BASE_ASSET}) ana %{GRID_STEP_UP_PERCENT} grid havuzuna baslangic "
+                    f"lotu olarak eklendi (giris fiyati={fiyat}). Ayrilmayan bakiyeye bot hic dokunmaz."
                 )
             if trend_qty > 0:
                 state["trend_pool"] = {
@@ -290,6 +386,17 @@ def run_once(state):
                     f"📈 Trend alt-havuzu olusturuldu: {trend_qty:,.0f} {BASE_ASSET} (giris fiyati={fiyat}). "
                     f"Hem 1sa hem 24sa degisim >=%{GRID_TREND_ENTRY_PERCENT} ise SHIB'de kalir/alir, "
                     f"ikisinden biri <=%{GRID_TREND_EXIT_PERCENT} olursa USDT'ye satar."
+                )
+            if wide_qty > 0:
+                state["wide_pool"] = {
+                    "reference_price": fiyat,
+                    "open_lots": [{"qty": wide_qty, "entry_price": fiyat, "quote_spent": wide_qty * fiyat}],
+                    "qty_usdt": 0.0,
+                }
+                notify(
+                    f"📐 Genis grid alt-havuzu olusturuldu: {wide_qty:,.0f} {BASE_ASSET} (giris fiyati={fiyat}). "
+                    f"Adim: asagi=%{GRID_WIDE_STEP_DOWN_PERCENT} yukari=%{GRID_WIDE_STEP_UP_PERCENT} "
+                    f"stop=%{GRID_WIDE_LOT_STOP_PERCENT} maks_lot={GRID_WIDE_MAX_OPEN_LOTS}."
                 )
         save_state(state)
         return
@@ -308,6 +415,8 @@ def run_once(state):
     )
     if trend_havuzu_aktif:
         run_trend_pool(state, fiyat, zaman, trend)
+    if state.get("wide_pool") is not None:
+        run_wide_pool(state, fiyat, zaman)
 
     # Cikislar (kar hedefi / stop-loss) her zaman YENI alimdan ONCE kontrol
     # edilir - koruyucu bir satis, yeni bir pozisyon acmaktan daha oncelikli
@@ -416,6 +525,11 @@ def main():
         trend_bilgisi += (
             f" TREND_HAVUZU(seed'in %{GRID_TREND_ALLOCATION_PERCENT} - giris>=%{GRID_TREND_ENTRY_PERCENT} "
             f"cikis<=%{GRID_TREND_EXIT_PERCENT})"
+        )
+    if GRID_WIDE_POOL_ENABLED:
+        trend_bilgisi += (
+            f" GENIS_GRID(seed'in %{GRID_WIDE_ALLOCATION_PERCENT} - adim=%{GRID_WIDE_STEP_DOWN_PERCENT}/"
+            f"%{GRID_WIDE_STEP_UP_PERCENT} stop=%{GRID_WIDE_LOT_STOP_PERCENT} maks_lot={GRID_WIDE_MAX_OPEN_LOTS})"
         )
     notify(
         f"🤖 Grid botu basladi. MODE={MODE} SYMBOL={SYMBOL} "

@@ -46,6 +46,15 @@ GRID_TREND_FILTER_24H_PERCENT = float(os.environ.get("GRID_TREND_FILTER_24H_PERC
 GRID_TREND_ALLOCATION_PERCENT = float(os.environ.get("GRID_TREND_ALLOCATION_PERCENT", "0"))
 GRID_TREND_ENTRY_PERCENT = float(os.environ.get("GRID_TREND_ENTRY_PERCENT", "1"))
 GRID_TREND_EXIT_PERCENT = float(os.environ.get("GRID_TREND_EXIT_PERCENT", "-1"))
+# grid_bot.py'deki GENIS grid alt-havuzunun backtest karsiligi - ana %1
+# grid ile AYNI mantik (fiyat %X dusunce al, lotun girisinden %X yukselince
+# sat), sadece daha genis adimla, seed'in ayri bir payinda calisir.
+GRID_WIDE_ALLOCATION_PERCENT = float(os.environ.get("GRID_WIDE_ALLOCATION_PERCENT", "0"))
+GRID_WIDE_STEP_DOWN_PERCENT = float(os.environ.get("GRID_WIDE_STEP_DOWN_PERCENT", "5"))
+GRID_WIDE_STEP_UP_PERCENT = float(os.environ.get("GRID_WIDE_STEP_UP_PERCENT", "5"))
+GRID_WIDE_LOT_STOP_PERCENT = float(os.environ.get("GRID_WIDE_LOT_STOP_PERCENT", "10"))
+GRID_WIDE_ORDER_PERCENT = float(os.environ.get("GRID_WIDE_ORDER_PERCENT", "10"))
+GRID_WIDE_MAX_OPEN_LOTS = int(os.environ.get("GRID_WIDE_MAX_OPEN_LOTS", "8"))
 
 
 def simulate(kapanislar, zamanlar):
@@ -75,6 +84,22 @@ def simulate(kapanislar, zamanlar):
         else:
             usdt -= trend_value
             trend_pool = {"position": "flat", "qty_shib": 0.0, "qty_usdt": trend_value}
+
+    wide_pool = None
+    if GRID_WIDE_ALLOCATION_PERCENT > 0:
+        wide_value = BACKTEST_START_CAPITAL * (GRID_WIDE_ALLOCATION_PERCENT / 100)
+        if START_IN_SHIB:
+            wide_qty = wide_value / kapanislar[0]
+            open_lots[0]["qty"] -= wide_qty
+            open_lots[0]["quote_spent"] -= wide_value
+            wide_pool = {
+                "reference_price": kapanislar[0],
+                "open_lots": [{"qty": wide_qty, "entry_price": kapanislar[0], "quote_spent": wide_value}],
+                "qty_usdt": 0.0,
+            }
+        else:
+            usdt -= wide_value
+            wide_pool = {"reference_price": kapanislar[0], "open_lots": [], "qty_usdt": wide_value}
 
     referans_fiyat = kapanislar[0]
     trades = []
@@ -126,6 +151,38 @@ def simulate(kapanislar, zamanlar):
                     trend_pool["qty_usdt"] = 0.0
                     trend_pool["position"] = "long"
 
+        if wide_pool is not None:
+            wide_satis_yapildi = False
+            for lot in sorted(wide_pool["open_lots"], key=lambda l: l["entry_price"]):
+                hedef = lot["entry_price"] * (1 + GRID_WIDE_STEP_UP_PERCENT / 100)
+                stop_seviyesi = lot["entry_price"] * (1 - GRID_WIDE_LOT_STOP_PERCENT / 100)
+                if fiyat >= hedef or fiyat <= stop_seviyesi:
+                    brut = lot["qty"] * fiyat
+                    net = brut * (1 - TRADING_FEE_PERCENT / 100)
+                    usdt += net
+                    coin -= lot["qty"]
+                    sebep = "genis_hedef" if fiyat >= hedef else "genis_stop"
+                    trades.append({"tip": "GENIS_SAT", "tarih": tarih, "fiyat": fiyat, "sebep": sebep})
+                    wide_pool["open_lots"].remove(lot)
+                    wide_pool["qty_usdt"] += net
+                    wide_pool["reference_price"] = fiyat
+                    wide_satis_yapildi = True
+                    break
+            wide_al_tetik = fiyat <= wide_pool["reference_price"] * (1 - GRID_WIDE_STEP_DOWN_PERCENT / 100)
+            wide_harcanacak = wide_pool["qty_usdt"] * (GRID_WIDE_ORDER_PERCENT / 100)
+            if (
+                not wide_satis_yapildi and wide_al_tetik
+                and len(wide_pool["open_lots"]) < GRID_WIDE_MAX_OPEN_LOTS and wide_harcanacak > 0
+            ):
+                alim_ucreti = wide_harcanacak * TRADING_FEE_PERCENT / 100
+                qty = (wide_harcanacak - alim_ucreti) / fiyat
+                usdt -= wide_harcanacak
+                coin += qty
+                wide_pool["qty_usdt"] -= wide_harcanacak
+                wide_pool["open_lots"].append({"qty": qty, "entry_price": fiyat, "quote_spent": wide_harcanacak})
+                wide_pool["reference_price"] = fiyat
+                trades.append({"tip": "GENIS_AL", "tarih": tarih, "fiyat": fiyat})
+
         # Cikislar (kar hedefi/stop-loss) her zaman yeni alimdan ONCE kontrol
         # edilir - koruyucu satis, yeni pozisyon acmaktan daha oncelikli olmali.
         satis_yapildi = False
@@ -160,10 +217,10 @@ def simulate(kapanislar, zamanlar):
         equity_egrisi.append(usdt + coin * fiyat)
         coin_egrisi.append(coin + usdt / fiyat)
 
-    return trades, equity_egrisi, coin_egrisi, baslangic_coin_esdeger, len(open_lots), trend_pool
+    return trades, equity_egrisi, coin_egrisi, baslangic_coin_esdeger, len(open_lots), trend_pool, wide_pool
 
 
-def ozet_yazdir(trades, equity_egrisi, coin_egrisi, baslangic_coin, acik_lot_sayisi, mum_sayisi, trend_pool=None):
+def ozet_yazdir(trades, equity_egrisi, coin_egrisi, baslangic_coin, acik_lot_sayisi, mum_sayisi, trend_pool=None, wide_pool=None):
     toplam_deger = equity_egrisi[-1] if equity_egrisi else BACKTEST_START_CAPITAL
     getiri_yuzde = (toplam_deger - BACKTEST_START_CAPITAL) / BACKTEST_START_CAPITAL * 100
 
@@ -190,6 +247,9 @@ def ozet_yazdir(trades, equity_egrisi, coin_egrisi, baslangic_coin, acik_lot_say
           f"siparis=%{GRID_ORDER_PERCENT} maks_lot={GRID_MAX_OPEN_LOTS} rezerv=%{GRID_RESERVE_PERCENT}")
     if GRID_TREND_FILTER_1H_PERCENT > -100 or GRID_TREND_FILTER_24H_PERCENT > -100:
         print(f"TREND FILTRE: 1sa<=%{GRID_TREND_FILTER_1H_PERCENT} veya 24sa<=%{GRID_TREND_FILTER_24H_PERCENT} ise ALIM atlanir")
+    if GRID_WIDE_ALLOCATION_PERCENT > 0:
+        print(f"GENIS GRID: seed'in %{GRID_WIDE_ALLOCATION_PERCENT} - adim=%{GRID_WIDE_STEP_DOWN_PERCENT}/"
+              f"%{GRID_WIDE_STEP_UP_PERCENT} stop=%{GRID_WIDE_LOT_STOP_PERCENT} maks_lot={GRID_WIDE_MAX_OPEN_LOTS}")
     print("=" * 56)
     print(f"Baslangic sermaye      : {BACKTEST_START_CAPITAL:,.2f} USDT")
     print(f"Bitis degeri            : {toplam_deger:,.2f} USDT")
@@ -209,6 +269,13 @@ def ozet_yazdir(trades, equity_egrisi, coin_egrisi, baslangic_coin, acik_lot_say
         print(f"Trend havuzu son durum  : {trend_pool['position']} "
               f"({trend_pool['qty_shib']:,.0f} {SYMBOL.replace('USDT', '')} / "
               f"{trend_pool['qty_usdt']:,.2f} USDT), {len(trend_islem)} trend islemi")
+    if wide_pool is not None:
+        wide_islem = [t for t in trades if t["tip"] in ("GENIS_AL", "GENIS_SAT")]
+        wide_shib = sum(l["qty"] for l in wide_pool["open_lots"])
+        print("-" * 56)
+        print(f"Genis grid son durum    : {len(wide_pool['open_lots'])} acik lot "
+              f"({wide_shib:,.0f} {SYMBOL.replace('USDT', '')}) / {wide_pool['qty_usdt']:,.2f} USDT, "
+              f"{len(wide_islem)} genis grid islemi")
     print("=" * 56)
 
     if token_degisim > 0:
@@ -231,8 +298,8 @@ def main():
     candles = fetch_history(SYMBOL, GRID_KLINE_INTERVAL, BACKTEST_DAYS)
     kapanislar = [float(c[4]) for c in candles]
     zamanlar = [c[0] for c in candles]
-    trades, equity_egrisi, coin_egrisi, baslangic_coin, acik_lot_sayisi, trend_pool = simulate(kapanislar, zamanlar)
-    ozet_yazdir(trades, equity_egrisi, coin_egrisi, baslangic_coin, acik_lot_sayisi, len(candles), trend_pool)
+    trades, equity_egrisi, coin_egrisi, baslangic_coin, acik_lot_sayisi, trend_pool, wide_pool = simulate(kapanislar, zamanlar)
+    ozet_yazdir(trades, equity_egrisi, coin_egrisi, baslangic_coin, acik_lot_sayisi, len(candles), trend_pool, wide_pool)
 
 
 if __name__ == "__main__":

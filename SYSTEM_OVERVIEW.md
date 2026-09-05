@@ -370,6 +370,24 @@ zaten trend-takip mantığının bu tarihsel pencerede saf grid'den kötü
 performans gösterdiğini kanıtladı; bu alt-havuz da muhtemelen aynı zayıflığı
 taşıyacak, sadece etkisi sınırlı bir paya (%25) hapsedilmiş oluyor.
 
+**Geniş grid alt-havuzu eklendi (`GRID_WIDE_ALLOCATION_PERCENT`, 05.09.2026):**
+Üç ayrı trend-takip denemesi (filtre, %0,3 havuz, %1 havuz) tutarlı şekilde
+saf grid'den kötü çıkınca, kullanıcı "%5'lik hareketleri kaçırdık" dedi.
+Bu kez trend tahmini değil, **kanıtlanmış aynı grid mantığının** (fiyat %X
+düşünce al, lotun girişinden %X yükselince sat) sadece daha geniş adımlı
+(%5) ikinci bir katmanı eklendi — mimarisi trend/geniş havuzlarla birebir
+aynı (kendi `open_lots`/`qty_usdt` sayaçlarını tutar, `get_balance()` ile
+hesap toplamını okumaz, ana %1 grid'in parasına karışmaz). Sentetik veriyle
+doğrulandı: %2'lik gürültüye (ana %1 grid bu aralıkta 49 kez işlem yaparken)
+hiç tepki vermedi, gerçek %5+'lik bir düşüş+yükseliş çiftinde doğru anda
+alıp sattı (~500 USDT'den 502,52 USDT'ye, %0,5 net kâr, %0,2 komisyon
+düşülmüş haliyle). Trend havuzlarının aksine bu, saf fiyat-yüzdesi mantığı
+olduğu için gürültüye karşı doğal olarak dayanıklı — whipsaw riski yok.
+`grid_backtest.py`'ye de aynı mantık eklendi; kullanıcının gerçek veriyle
+30/90/180 gün test edip token adedi etkisini görmesi ve GRID_SEED_SHIB_PERCENT
+havuzunun ne kadarını (`GRID_WIDE_ALLOCATION_PERCENT`) bu katmana ayıracağına
+karar vermesi bekleniyor - henüz gerçek veriyle test edilmedi.
+
 ## Bilinen sınırlamalar / dürüst notlar
 
 - Çoklu coin takibi, işlem geçmişi/performans dashboard'u gibi genişletmeler
