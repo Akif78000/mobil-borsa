@@ -172,6 +172,12 @@ def simulate(shib_series, majors_series, zamanlar, kapanislar, cost_percent=None
     coin_egrisi = []
     shib_pct_gecmisi = []
     regime_gecmisi = []
+    # TESHIS AMACLI (hicbir karara etkisi yok - sadece asagida zaten var olan
+    # ic durumun disariya aktarilmasi): hybrid_diagnostic.py'nin "hysteresis
+    # gercekten kac saat ekliyor" sorusunu HAM (confirmed ONCESI) rejimle
+    # gercek (confirmed) rejim gecisini karsilastirarak olcebilmesi icin her
+    # rebalance kontrolunde ham+onaylanmis durumun tam anlik goruntusu.
+    hysteresis_gecmisi = []
     prev_score = 0.0
     # HYSTERESIS durumu: ham rejim ayni kalmadan PORTFOLIO MANAGER'a
     # yansimaz - flip-flop / gereksiz al-sat azaltilir (kullanicinin acik
@@ -232,6 +238,13 @@ def simulate(shib_series, majors_series, zamanlar, kapanislar, cost_percent=None
                         trades.append({"tip": "TREND_SLEEVE_SAT", "tarih": tarih, "fiyat": fiyat, "regime": confirmed_regime})
 
             regime_gecmisi.append((i, karar_zamani, confirmed_regime, confirmed_score, trend_target))
+            hysteresis_gecmisi.append({
+                "idx": i, "ts_ms": karar_zamani,
+                "raw_regime": sonuc["regime"], "raw_score": sonuc["score"],
+                "candidate_regime": candidate_regime, "candidate_count": candidate_count,
+                "confirmed_regime": confirmed_regime, "confirmed_score": confirmed_score,
+                "trend_target": trend_target,
+            })
 
         toplam_usdt = grid_state["usdt"] + trend_usdt
         toplam_coin = grid_state["coin"] + trend_coin
@@ -244,7 +257,7 @@ def simulate(shib_series, majors_series, zamanlar, kapanislar, cost_percent=None
     return {
         "trades": trades, "equity_egrisi": equity_egrisi, "coin_egrisi": coin_egrisi,
         "baslangic_coin": baslangic_coin_esdeger, "shib_pct_gecmisi": shib_pct_gecmisi,
-        "regime_gecmisi": regime_gecmisi,
+        "regime_gecmisi": regime_gecmisi, "hysteresis_gecmisi": hysteresis_gecmisi,
     }
 
 

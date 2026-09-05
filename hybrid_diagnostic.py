@@ -1,43 +1,76 @@
 """
-HYBRID motorunun GUCLU trendleri NEDEN GEC yakaladigini teshis eden arac.
+HYBRID motorunun GUCLU trendleri NEDEN GEC yakaladigini teshis eden arac -
+CAUSAL (nedensel) surum.
 
 ONEMLI: Bu script hybrid_engine.py / portfolio_manager.py / hybrid_backtest.py
-DOSYALARINA HIC DOKUNMAZ, hicbir parametre/esik/allocation degistirmez, yeni
-gosterge eklemez. SADECE o dosyalarin zaten hesapladigi gostergeleri (EMA,
-KAMA, SuperTrend, Nadaraya-Watson, WaveTrend, majors) FARKLI ac/kapa
-kombinasyonlarinda (kontrfaktuel) yeniden birlestirip "hangi katman kac saat
-gecikme ekliyor" sorusuna sayisal/matematiksel cevap arar.
+DOSYALARINA HIC DOKUNMAZ (hybrid_backtest.py'ye eklenen tek sey, zaten var
+olan ic hysteresis durumunu DISARIYA AKTARAN, hicbir karari DEGISTIRMEYEN
+"hysteresis_gecmisi" listesidir). Hicbir parametre/esik/allocation
+degistirilmedi, yeni gosterge eklenmedi.
 
-Yontem (her >=%5/24sa buyuk hareket icin):
-  1) Her gostergenin KENDI (1sa zaman diliminde) "ilk sinyal zamani" -
-     olayin yonuyle ayni yone donen ilk an.
-  2) HYBRID motorunun (hysteresis dahil GERCEK davranisi) o rejime ilk
-     GECTIGI an.
-  3) KONTROFAKTUEL skor zincirleri: EMA-only -> +KAMA -> +SuperTrend ->
-     +Nadaraya-Watson -> +WaveTrend -> +Majors (=gercek HAM skor, hysteresis
-     HARIC). Her adimda esigi (YON=30) ne zaman gectigini bularak, bir
-     onceki adima gore NE KADAR gecikme EKLEDIGINI (veya azalttigini) izole
-     eder. Hysteresis'in kendi gecikmesi = (confirmed - ham) farki.
-     Allocation-step gecikmesi = (rejim onaylandiktan sonra gercek SHIB
-     payinin hedefe yaklasmasi ne kadar surdu).
-  4) Her olay icin BASKIN (en buyuk) gecikme nedeni bir REASON CODE olarak
-     yazilir; sonda REASON x COUNT x ORTALAMA GECIKME tablosu ve "en cok
-     geciktiren 3 faktor" cevabi verilir.
+NEDEN BU SURUM VAR (onceki surumdeki metrik hatasi):
+  Eski surum, HER gostergenin (EMA/KAMA/SUPERTREND/NW/WT/MAJORS) gecikmesini
+  bir KONTROFAKTUEL ZINCIRIN (V0=EMA-only -> V1=+KAMA -> ... -> V6=HAM skor)
+  ARDISIK FARKI olarak hesapliyordu, SONRA hysteresis gecikmesini de bu
+  zincirin son adimiyla GERCEK (confirmed) rejim arasindaki farktan
+  buluyordu. Bu, farkli olceklerdeki degerleri (zincir-ici artis vs.
+  toplam-sureden-turetilmis fark) TEK bir "reason" secimiyle karistiriyordu.
+  Ozellikle HYSTERESIS_DELAY icin bulunan 70.8 saatlik ortalama, sistemin
+  gercek mekanigiyle (60 dakikada bir kontrol, N=2 ardisik onay -> normalde
+  ~1 saat ek gecikme) MATEMATIKSEL OLARAK TUTARSIZDI - kullanicinin dogru
+  tespit ettigi gibi, o buyuk sayi aslinda HAM sinyalin esik civarinda
+  SALINIP hysteresis sayacini defalarca SIFIRLAMASINDAN kaynaklaniyor
+  olmali, "hysteresis mekanizmasinin kendisi" 70 saat surmuyor.
+
+  Bu surumde HER faktorun gecikmesi BAGIMSIZ ve KENDI TANIMIYLA olculur:
+    - Her gosterge (EMA/KAMA/SUPERTREND/NW/WAVETREND) icin: olay
+      basladiktan (T0) SONRA o gostergenin KENDI oyu ilk kez olay yonune
+      donene kadar gecen sure (zincir farki DEGIL, dogrudan T0'dan gecen
+      sure).
+    - MAJOR_CONFIRMATION: BTC/ETH/BNB agirlikli yon (_majors_direction)
+      ilk kez olay yonunde ve |yon|>0.2 esigini gecene kadar T0'dan gecen
+      sure.
+    - SCORE_THRESHOLD: TAM HAM bilesik skorun (hysteresis HARIC, gercek
+      classify() matematigiyle BIREBIR ayni) ESIK_YON'u ilk gectigi ana
+      kadar T0'dan gecen sure.
+    - HYSTERESIS_EXTRA: hb.simulate()'in GERCEK calisan hysteresis
+      durumundan (hysteresis_gecmisi) okunur - ham (confirmed-oncesi)
+      rejimin olay yonune İLK donduğu kontrol anindan (first_valid_signal_
+      time), confirmed_regime'in fiilen olay yonune GECTIGI ana kadar
+      (second_consecutive/nihai onay ani) gecen sure. Ayrica bu iki an
+      arasinda ham rejimin KAC KEZ olay-yonu-DISINA cikip sayaci sifirladigi
+      (reset_count) da ayrica olculur - boylece "saf hysteresis" (N=2 x
+      60dk =~1 saat, reset_count=0) ile "gurultu nedeniyle sayac sifirlama"
+      (reset_count>0, potansiyel olarak COK daha uzun) birbirinden
+      MATEMATIKSEL OLARAK AYRISTIRILIR (kullanicinin istedigi sanity check).
+    - ALLOCATION_STEP: confirmed rejim FIILEN olay yonune gectikten sonra,
+      gercek (blended) SHIB payinin hedef banda (%75 yukselis / %25 dusus)
+      ulasmasina kadar gecen EK sure (onceki surumle ayni tanim - bu zaten
+      bagimsizdi, degistirilmedi).
+
+  Boylece hicbir faktorun gecikmesi bir BASKASININ gecikmesini icine
+  ALMAZ - "tek bir reason_code secip TUM gecikmeyi ona yukleme" sorunu
+  ortadan kalkar; onun yerine HER faktor icin ayri MEDIAN/ORTALAMA/olay-
+  sayisi raporlanir (kullanicinin istedigi format).
 
 Kullanim: python3 hybrid_diagnostic.py   (BACKTEST_DAYS ile pencere secilir)
-Cikti: hybrid_diagnostic_events.csv + konsol ozeti.
+Cikti:
+  - hybrid_causal_diagnostics.csv  (olay-bazli, 9 bagimsiz gecikme kolonu)
+  - hybrid_causal_ticks.csv        (olay basina, saat-saat ham durum kaydi -
+    hysteresis_counter / ok bayraklari / target-actual allocation dahil)
+  - konsol: FAKTOR x MEDIAN x ORTALAMA x OLAY-SAYISI tablosu + iki sanity
+    check + "en cok geciktiren 3 faktor" cevabi (MEDIAN'a gore).
 """
 
 import csv
 import os
+import statistics
 import time
 
-from backtest import fetch_history, INTERVAL_MS
 from trade_bot import _load_dotenv
 import hybrid_engine as he
 import hybrid_backtest as hb
 import trend_engine_backtest as teb
-import portfolio_manager as pm
 
 _load_dotenv()
 
@@ -48,76 +81,19 @@ SCAN_HORIZON_HOURS = 120  # bir olaydan sonra en fazla bu kadar saat ileri taran
 ESIK_YON = he.HYBRID_ESIK_YON       # 30 (varsayilan) - degistirilmedi, sadece okunuyor
 ESIK_GUCLU = he.HYBRID_ESIK_GUCLU   # 70 (varsayilan)
 HYSTERESIS_BARS = hb.HYBRID_HYSTERESIS_BARS
+REBALANCE_HOURS = hb.HYBRID_REBALANCE_MINUTES / 60.0
 
 
-def _composite_variant(shib_series, majors_series, timestamp_ms,
-                        use_kama=True, use_st=True, use_nw=True, use_wt=True, use_majors=True):
-    """hybrid_engine.classify() ile AYNI matematik - sadece hangi katmanlarin
-    ACIK oldugu parametrik. hybrid_engine.py'nin private yardimci
-    fonksiyonlarini (NW/WT/majors icin) OKUYARAK cagirir, DEGISTIRMEZ."""
-    total_weight = 0.0
-    total_vote = 0.0
-    for tf in he.TIMEFRAMES:
-        ts = shib_series.get(tf)
-        if ts is None:
-            continue
-        idx = ts.index_at(timestamp_ms)
-        if idx is None:
-            continue
-        ema_v = ts.ema_vote(idx)
-        if ema_v is None:
-            continue
-        if ema_v == 0:
-            vote = 0
-        else:
-            guc = 1.0
-            if use_kama:
-                kama_v = ts.kama_vote(idx)
-                if kama_v is None:
-                    guc *= 0.7
-                elif kama_v == ema_v:
-                    guc *= 1.0
-                elif kama_v == 0:
-                    guc *= 0.7
-                else:
-                    guc *= 0.4
-            if use_st:
-                st_v = ts.supertrend_vote(idx)
-                if st_v is None:
-                    guc *= 0.8
-                elif st_v == ema_v:
-                    guc *= 1.0
-                else:
-                    guc *= 0.5
-            vote = ema_v * guc
-        w = he.TIMEFRAME_WEIGHTS.get(tf, 1)
-        total_vote += vote * w
-        total_weight += w
-    mtf_direction = (total_vote / total_weight) if total_weight else 0.0
-
-    ts_1h = shib_series.get("1h")
-    idx_1h = ts_1h.index_at(timestamp_ms) if ts_1h else None
-    adx_1h = ts_1h.adx[idx_1h] if (ts_1h and idx_1h is not None) else None
-    strength_mult = min(adx_1h / 40.0, 1.0) if adx_1h is not None else 0.3
-    composite = 100 * mtf_direction * strength_mult
-
-    if use_nw:
-        composite, _ = he._nw_adjustment(ts_1h, idx_1h, composite)
-    if use_wt:
-        composite, _ = he._wt_adjustment(ts_1h, idx_1h, composite)
-    if use_majors:
-        majors_dir = he._majors_direction(majors_series, timestamp_ms)
-        if abs(majors_dir) > 0.2:
-            if majors_dir * composite < 0:
-                composite *= 0.5
-            elif majors_dir * composite > 0 and abs(majors_dir) > 0.3:
-                composite = max(-100.0, min(100.0, composite * 1.15))
-    return max(-100.0, min(100.0, composite))
+def _composite_ham(shib_series, majors_series, timestamp_ms):
+    """hybrid_engine.classify() ile BIREBIR AYNI HAM skor (hysteresis HARIC).
+    he.classify()'in KENDISINI cagirir - ayri bir matematik YENIDEN
+    YAZILMAZ, sadece prev_score'a bagli TOPARLANMA/DAGITIM etiketi bu
+    amac icin onemli olmadigindan sabit 0.0 ile cagrilir (etiket
+    kullanilmiyor, sadece 'composite' sayisal degeri okunuyor)."""
+    return he.classify(shib_series, majors_series, timestamp_ms, prev_score=0.0)["score"]
 
 
 def _first_cross_hour(ts_1h_series, idx_start, yon, deger_func, esik):
-    """idx_start'tan itibaren saat saat ilerleyip deger_func(idx)'in
-    `yon`a gore esigi ilk GECTIGI saat farkini dondurur (yoksa None)."""
     n = len(ts_1h_series.closes)
     for offset in range(0, SCAN_HORIZON_HOURS):
         idx = idx_start + offset
@@ -146,6 +122,21 @@ def _first_vote_match_hour(ts_1h_series, idx_start, yon, vote_func):
     return None
 
 
+def _majors_first_confirm_hour(ts_1h_series, idx_start, majors_series, yon):
+    n = len(ts_1h_series.closes)
+    for offset in range(0, SCAN_HORIZON_HOURS):
+        idx = idx_start + offset
+        if idx >= n:
+            return None
+        ts_ms = ts_1h_series.close_times[idx]
+        d = he._majors_direction(majors_series, ts_ms)
+        if yon == "YUKARI" and d > 0.2:
+            return offset
+        if yon == "ASAGI" and d < -0.2:
+            return offset
+    return None
+
+
 def _nw_slope_vote(ts, idx, lookback=3):
     if ts.nw is None or idx < lookback:
         return None
@@ -164,21 +155,26 @@ def _wt_slope_vote(ts, idx, lookback=2):
     return 1 if a > b else (-1 if a < b else 0)
 
 
+def _fmt(ts_ms):
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts_ms / 1000)) if ts_ms is not None else None
+
+
 def main():
     print(f"[TESHIS] Veri cekiliyor: SHIBUSDT + BTC/ETH/BNB, son {BACKTEST_DAYS} gun...")
     shib_series, majors_series, zamanlar, kapanislar = hb._fetch_hybrid_all(BACKTEST_DAYS)
     ts_1h = shib_series["1h"]
 
-    print("[TESHIS] Gercek HYBRID simulate() calistiriliyor (hysteresis dahil gercek davranis icin)...")
+    print("[TESHIS] Gercek HYBRID simulate() calistiriliyor (hysteresis_gecmisi dahil gercek davranis icin)...")
     sonuc = hb.simulate(shib_series, majors_series, zamanlar, kapanislar)
-    regime_gecmisi = sonuc["regime_gecmisi"]  # (idx15m, ts_ms, confirmed_regime, score, target)
     shib_pct_gecmisi = sonuc["shib_pct_gecmisi"]
+    hysteresis_gecmisi = sonuc["hysteresis_gecmisi"]
 
     events = teb._big_move_events(zamanlar, kapanislar, BIG_MOVE_THRESHOLD_PERCENT, BIG_MOVE_WINDOW_HOURS)
     print(f"[TESHIS] {len(events)} buyuk hareket (>=%{BIG_MOVE_THRESHOLD_PERCENT}/{BIG_MOVE_WINDOW_HOURS:.0f}sa) bulundu.\n")
 
     satirlar = []
-    reason_delays = {}  # reason -> [delay_saat, ...]
+    tick_satirlari = []
+    never_crossed_events = []
 
     for i, (start_idx, end_idx, yon, degisim) in enumerate(events):
         event_start_ms = zamanlar[start_idx]
@@ -186,167 +182,189 @@ def main():
         if idx1h_start is None:
             continue
 
-        # --- 1) Her gostergenin KENDI ilk sinyal zamani (1sa TF) ---
+        hedef_regimeler = {"YUKSELIS", "GUCLU_YUKSELIS"} if yon == "YUKARI" else {"DUSUS", "GUCLU_DUSUS"}
+        hedef_guclu = {"GUCLU_YUKSELIS"} if yon == "YUKARI" else {"GUCLU_DUSUS"}
+
+        # --- 1) Her gostergenin BAGIMSIZ (T0'dan itibaren) ilk sinyal zamani ---
         ema_h = _first_vote_match_hour(ts_1h, idx1h_start, yon, ts_1h.ema_vote)
         kama_h = _first_vote_match_hour(ts_1h, idx1h_start, yon, ts_1h.kama_vote)
         st_h = _first_vote_match_hour(ts_1h, idx1h_start, yon, ts_1h.supertrend_vote)
         nw_h = _first_vote_match_hour(ts_1h, idx1h_start, yon, lambda idx: _nw_slope_vote(ts_1h, idx))
         wt_h = _first_vote_match_hour(ts_1h, idx1h_start, yon, lambda idx: _wt_slope_vote(ts_1h, idx))
-        majors_h = {}
-        for sym, tf_map in majors_series.items():
-            m_ts = tf_map.get("1h")
-            majors_h[sym] = _first_vote_match_hour(m_ts, m_ts.index_at(event_start_ms), yon, m_ts.ema_vote) if m_ts else None
+        major_h = _majors_first_confirm_hour(ts_1h, idx1h_start, majors_series, yon)
 
-        # --- 2) Kontrofaktuel zincir: V0..V5 (V5 = gercek HAM skor, hysteresis haric) ---
-        def cross(**kwargs):
-            return _first_cross_hour(
-                ts_1h, idx1h_start, yon,
-                lambda idx: _composite_variant(shib_series, majors_series, ts_1h.close_times[idx], **kwargs),
-                ESIK_YON,
-            )
-        t0 = cross(use_kama=False, use_st=False, use_nw=False, use_wt=False, use_majors=False)
-        t1 = cross(use_kama=True, use_st=False, use_nw=False, use_wt=False, use_majors=False)
-        t2 = cross(use_kama=False, use_st=True, use_nw=False, use_wt=False, use_majors=False)
-        t3 = cross(use_kama=True, use_st=True, use_nw=False, use_wt=False, use_majors=False)
-        t4 = cross(use_kama=True, use_st=True, use_nw=True, use_wt=False, use_majors=False)
-        t5 = cross(use_kama=True, use_st=True, use_nw=True, use_wt=True, use_majors=False)
-        t6 = cross(use_kama=True, use_st=True, use_nw=True, use_wt=True, use_majors=True)  # = gercek HAM
+        # --- 2) SCORE_THRESHOLD: T7 = HAM (hysteresis haric) bilesik skorun
+        # ESIK_YON'u T0'dan itibaren ilk gectigi saat ---
+        score_h = _first_cross_hour(
+            ts_1h, idx1h_start, yon,
+            lambda idx: _composite_ham(shib_series, majors_series, ts_1h.close_times[idx]),
+            ESIK_YON,
+        )
+        if score_h is None:
+            never_crossed_events.append(i)
 
-        def delta(a, b):
-            if a is None or b is None:
-                return None
-            return a - b
+        # --- 3) HYSTERESIS_EXTRA: GERCEK hysteresis_gecmisi'nden -
+        # ham rejim ilk kez olay yonune donduğu an (first_valid_signal_time)
+        # -> confirmed_regime'in fiilen olay yonune gectigi an. Aradaki
+        # "reset_count" = bu iki an arasinda ham rejimin kac kez olay-
+        # yonu DISINA cikip hysteresis sayacini sifirladigi. ---
+        ticks = [t for t in hysteresis_gecmisi if t["ts_ms"] >= event_start_ms]
+        first_valid_tick = next((t for t in ticks if t["raw_regime"] in hedef_regimeler), None)
+        t_valid_ms = first_valid_tick["ts_ms"] if first_valid_tick else None
+        t_confirm_ms, hysteresis_extra_h, reset_count = None, None, None
+        if first_valid_tick is not None:
+            confirm_tick = next((t for t in ticks if t["ts_ms"] >= t_valid_ms and t["confirmed_regime"] in hedef_regimeler), None)
+            if confirm_tick is not None:
+                t_confirm_ms = confirm_tick["ts_ms"]
+                hysteresis_extra_h = (t_confirm_ms - t_valid_ms) / 3_600_000
+                reset_count = sum(1 for t in ticks if t_valid_ms < t["ts_ms"] < t_confirm_ms and t["raw_regime"] not in hedef_regimeler)
 
-        delay_kama = delta(t3, t2)
-        delay_st = delta(t3, t1)
-        delay_nw = delta(t4, t3)
-        delay_wt = delta(t5, t4)
-        delay_majors = delta(t6, t5)
+        guclu_tick = next((t for t in ticks if t["confirmed_regime"] in hedef_guclu), None)
+        t_guclu_ms = guclu_tick["ts_ms"] if guclu_tick else None
 
-        # --- 3) HYBRID'in GERCEK (hysteresis dahil) ilk hedef rejime gecis ani ---
-        hedef_regimeler = {"YUKSELIS", "GUCLU_YUKSELIS"} if yon == "YUKARI" else {"DUSUS", "GUCLU_DUSUS"}
-        hedef_guclu = {"GUCLU_YUKSELIS"} if yon == "YUKARI" else {"GUCLU_DUSUS"}
-        t_confirmed_ms = None
-        t_guclu_ms = None
-        for idx15, ts_ms, regime, _score, _target in regime_gecmisi:
-            if idx15 < start_idx:
-                continue
-            if t_confirmed_ms is None and regime in hedef_regimeler:
-                t_confirmed_ms = ts_ms
-            if t_guclu_ms is None and regime in hedef_guclu:
-                t_guclu_ms = ts_ms
-            if t_confirmed_ms is not None and t_guclu_ms is not None:
-                break
-        t_confirmed_h = ((t_confirmed_ms - event_start_ms) / 3_600_000) if t_confirmed_ms else None
-        t_guclu_h = ((t_guclu_ms - event_start_ms) / 3_600_000) if t_guclu_ms else None
-        delay_hysteresis = delta(t_confirmed_h, t6)
-
-        # --- 4) Allocation-step gecikmesi: rejim onaylandiktan sonra gercek
-        # (blended) SHIB payi %75'e ne zaman ulasti (yukselis) / %25'in
-        # altina ne zaman indi (dusus) ---
+        # --- 4) ALLOCATION_STEP: confirmed rejim FIILEN olay yonune
+        # gectikten (t_confirm_ms) sonra, gercek SHIB payinin hedef banda
+        # (%75 yukselis / %25 dusus) ulasmasina kadar gecen EK sure ---
         alloc_esik = 75 if yon == "YUKARI" else 25
-        t_alloc_h = None
-        if t_confirmed_ms is not None:
-            conf_idx15 = next((r[0] for r in regime_gecmisi if r[1] == t_confirmed_ms), None)
-            if conf_idx15 is not None:
-                for j in range(conf_idx15, min(conf_idx15 + 400, len(shib_pct_gecmisi))):
+        allocation_h = None
+        if t_confirm_ms is not None:
+            conf_idx = next((t["idx"] for t in ticks if t["ts_ms"] == t_confirm_ms), None)
+            if conf_idx is not None:
+                for j in range(conf_idx, min(conf_idx + 400, len(shib_pct_gecmisi))):
                     pct = shib_pct_gecmisi[j]
                     if (yon == "YUKARI" and pct >= alloc_esik) or (yon == "ASAGI" and pct <= alloc_esik):
-                        t_alloc_h = (zamanlar[j] - t_confirmed_ms) / 3_600_000
+                        allocation_h = (zamanlar[j] - t_confirm_ms) / 3_600_000
                         break
-        delay_allocation = t_alloc_h  # zaten "confirmed'dan sonraki ek sure"
 
-        # --- 5) SHIB payi: olay basi / +3/6/12/24 saat ---
         def pct_at(offset_h):
             steps = int(offset_h * 4)  # 15dk adim
             j = start_idx + steps
             return shib_pct_gecmisi[j] if 0 <= j < len(shib_pct_gecmisi) else None
 
-        # --- 6) Reason code: en buyuk (pozitif) gecikme katkisi ---
-        adaylar = {
-            "WAIT_KAMA": delay_kama,
-            "WAIT_SUPERTREND": delay_st,
-            "WAIT_NW": delay_nw,
-            "WAIT_WAVETREND": delay_wt,
-            "WAIT_MAJOR_CONFIRMATION": delay_majors,
-            "HYSTERESIS_DELAY": delay_hysteresis,
-            "ALLOCATION_STEP_TOO_SLOW": delay_allocation,
-        }
-        gecerli_adaylar = {k: v for k, v in adaylar.items() if v is not None and v > 0}
-        if t6 is None:
-            reason = "SCORE_BELOW_THRESHOLD"
-        elif gecerli_adaylar:
-            reason = max(gecerli_adaylar, key=gecerli_adaylar.get)
-        else:
-            reason = "NONE_ALL_FAST"
-
-        if reason not in ("SCORE_BELOW_THRESHOLD", "NONE_ALL_FAST"):
-            reason_delays.setdefault(reason, []).append(gecerli_adaylar[reason])
-        elif reason == "SCORE_BELOW_THRESHOLD":
-            reason_delays.setdefault(reason, []).append(0)
-
         satir = {
             "event_id": i, "direction": yon,
-            "event_start": time.strftime("%Y-%m-%d %H:%M", time.localtime(event_start_ms / 1000)),
-            "event_end": time.strftime("%Y-%m-%d %H:%M", time.localtime(zamanlar[end_idx] / 1000)),
-            "start_price": kapanislar[start_idx], "end_price": kapanislar[end_idx],
-            "move_percent": round(degisim, 2),
-            "ema_signal_h": ema_h, "kama_signal_h": kama_h, "supertrend_signal_h": st_h,
-            "nw_signal_h": nw_h, "wavetrend_signal_h": wt_h,
-            "btc_confirm_h": majors_h.get("BTCUSDT"), "eth_confirm_h": majors_h.get("ETHUSDT"),
-            "bnb_confirm_h": majors_h.get("BNBUSDT"),
-            "raw_v0_ema_only_h": t0, "raw_v1_ema_kama_h": t1, "raw_v2_ema_st_h": t2,
-            "raw_v3_ema_kama_st_h": t3, "raw_v4_plus_nw_h": t4, "raw_v5_plus_wt_h": t5,
-            "raw_v6_full_ham_h": t6,
-            "hybrid_confirmed_h": t_confirmed_h, "hybrid_guclu_h": t_guclu_h,
-            "delay_kama": delay_kama, "delay_supertrend": delay_st, "delay_nw": delay_nw,
-            "delay_wavetrend": delay_wt, "delay_majors": delay_majors,
-            "delay_hysteresis": delay_hysteresis, "delay_allocation_step": delay_allocation,
-            "reason_code": reason,
-            "shib_pct_at_start": pct_at(0), "shib_pct_3h": pct_at(3), "shib_pct_6h": pct_at(6),
+            "event_start": _fmt(event_start_ms), "move_pct": round(degisim, 2),
+            "ema_delay_h": ema_h, "kama_delay_h": kama_h, "supertrend_delay_h": st_h,
+            "nw_delay_h": nw_h, "wavetrend_delay_h": wt_h, "major_delay_h": major_h,
+            "score_threshold_delay_h": score_h,
+            "hysteresis_extra_delay_h": round(hysteresis_extra_h, 2) if hysteresis_extra_h is not None else None,
+            "hysteresis_reset_count": reset_count,
+            "allocation_delay_h": round(allocation_h, 2) if allocation_h is not None else None,
+            "first_valid_signal_time": _fmt(t_valid_ms),
+            "strong_trend_time": _fmt(t_guclu_ms),
+            "shib_pct_start": pct_at(0), "shib_pct_3h": pct_at(3), "shib_pct_6h": pct_at(6),
             "shib_pct_12h": pct_at(12), "shib_pct_24h": pct_at(24),
         }
         satirlar.append(satir)
-        print(f"[{i}] {yon} {degisim:+.1f}% @ {satir['event_start']} -> reason={reason}")
+        skor_notu = "HIC ESIGI GECMEDI" if score_h is None else f"skor esigi +{score_h}h"
+        print(f"[{i}] {yon} {degisim:+.1f}% @ {satir['event_start']} -> {skor_notu}, "
+              f"hysteresis_extra={satir['hysteresis_extra_delay_h']}h (reset={reset_count})")
+
+        # --- per-tick ham gunluk (kullanicinin istedigi tam denetim izi) ---
+        hedef_oy = 1 if yon == "YUKARI" else -1
+        for t in ticks:
+            if t["ts_ms"] > event_start_ms + SCAN_HORIZON_HOURS * 3_600_000:
+                break
+            idx1h = ts_1h.index_at(t["ts_ms"])
+            tick_satirlari.append({
+                "event_id": i, "direction": yon, "timestamp": _fmt(t["ts_ms"]),
+                "hybrid_score_raw": round(t["raw_score"], 2), "regime_raw": t["raw_regime"],
+                "confirmed_regime": t["confirmed_regime"],
+                "ema_ok": ts_1h.ema_vote(idx1h) == hedef_oy,
+                "kama_ok": ts_1h.kama_vote(idx1h) == hedef_oy,
+                "supertrend_ok": ts_1h.supertrend_vote(idx1h) == hedef_oy,
+                "nw_ok": _nw_slope_vote(ts_1h, idx1h) == hedef_oy if idx1h is not None else False,
+                "wavetrend_ok": _wt_slope_vote(ts_1h, idx1h) == hedef_oy if idx1h is not None else False,
+                "major_confirmation_ok": (he._majors_direction(majors_series, t["ts_ms"]) > 0.2) if yon == "YUKARI"
+                                         else (he._majors_direction(majors_series, t["ts_ms"]) < -0.2),
+                "score_threshold_ok": t["raw_regime"] in hedef_regimeler,
+                "hysteresis_counter": t["candidate_count"],
+                "hysteresis_ok": t["confirmed_regime"] in hedef_regimeler,
+                "target_shib_allocation": round(t["trend_target"], 2),
+                "actual_shib_allocation": round(shib_pct_gecmisi[t["idx"]], 2),
+            })
 
     if satirlar:
-        with open("hybrid_diagnostic_events.csv", "w", newline="") as f:
+        with open("hybrid_causal_diagnostics.csv", "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=list(satirlar[0].keys()))
             writer.writeheader()
             writer.writerows(satirlar)
-        print(f"\n[TESHIS] Detay CSV kaydedildi: hybrid_diagnostic_events.csv ({len(satirlar)} olay)")
+        print(f"\n[TESHIS] Olay-bazli CSV: hybrid_causal_diagnostics.csv ({len(satirlar)} olay)")
+    if tick_satirlari:
+        with open("hybrid_causal_ticks.csv", "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(tick_satirlari[0].keys()))
+            writer.writeheader()
+            writer.writerows(tick_satirlari)
+        print(f"[TESHIS] Saat-saat denetim izi CSV: hybrid_causal_ticks.csv ({len(tick_satirlari)} satir)")
 
-    print(f"\n{'=' * 70}\nREASON KODU DAGILIMI (sadece yukselis+dusus olaylari, tum yonler)\n{'=' * 70}")
-    print(f"{'Reason':<28} {'Count':>6} {'Ort.Gecikme(sa)':>16}")
-    print("-" * 70)
-    for reason, delays in sorted(reason_delays.items(), key=lambda kv: -sum(kv[1])):
-        ort = sum(delays) / len(delays) if delays else 0
-        print(f"{reason:<28} {len(delays):>6} {ort:>16.1f}")
+    # ============== SANITY CHECK 2: SCORE_BELOW_THRESHOLD duzeltmesi ==============
+    print(f"\n{'=' * 78}\nSANITY CHECK 2: SCORE_THRESHOLD - 'hic esigi gecmeyen' olaylar\n{'=' * 78}")
+    print(f"{len(never_crossed_events)} / {len(satirlar)} olayda HAM bilesik skor {SCAN_HORIZON_HOURS}sa tarama "
+          f"penceresinde ESIK_YON (+-{ESIK_YON}) degerine HIC ULASMADI.")
+    print("ONCEKI HATA: bu olaylar 'reason=SCORE_BELOW_THRESHOLD, ortalama gecikme 0.0 saat' olarak raporlaniyordu -")
+    print("bu YANLIS: gecikme YOKTUR, cunku olcecek bir 'gecikme' degil, motorun O HAREKETE HICBIR ZAMAN yeterince")
+    print("guclu bir yon skoru URETMEDIGI bir durumdur. DUZELTME: bu olaylar artik score_threshold_delay_h=None")
+    print("(bos) olarak kaydedilir ve asagidaki FAKTOR tablosundaki SCORE_THRESHOLD ortalamasina/medianina DAHIL")
+    print("EDILMEZ - sadece ayri bir sayac olarak raporlanir (yukarida).")
+    if never_crossed_events:
+        print(f"Olay ID'leri: {never_crossed_events}")
 
-    print(f"\n{'=' * 70}\nSADECE BUYUK YUKSELISLER icin (kullanicinin ana sorusu)\n{'=' * 70}")
-    yukselis_satirlari = [s for s in satirlar if s["direction"] == "YUKARI"]
-    yukselis_reasons = {}
-    for s in yukselis_satirlari:
-        r = s["reason_code"]
-        if r in ("SCORE_BELOW_THRESHOLD", "NONE_ALL_FAST"):
-            continue
-        d = s.get({
-            "WAIT_KAMA": "delay_kama", "WAIT_SUPERTREND": "delay_supertrend",
-            "WAIT_NW": "delay_nw", "WAIT_WAVETREND": "delay_wavetrend",
-            "WAIT_MAJOR_CONFIRMATION": "delay_majors", "HYSTERESIS_DELAY": "delay_hysteresis",
-            "ALLOCATION_STEP_TOO_SLOW": "delay_allocation_step",
-        }.get(r))
-        if d is not None:
-            yukselis_reasons.setdefault(r, []).append(d)
-    siralama = sorted(yukselis_reasons.items(), key=lambda kv: -sum(kv[1]))
-    print(f"{'Reason':<28} {'Count':>6} {'Ort.Gecikme(sa)':>16}")
-    print("-" * 70)
-    for reason, delays in siralama:
-        print(f"{reason:<28} {len(delays):>6} {sum(delays)/len(delays):>16.1f}")
+    # ============== FAKTOR TABLOSU (sadece buyuk YUKSELISLER) ==============
+    yukselis = [s for s in satirlar if s["direction"] == "YUKARI"]
+    kolon_map = [
+        ("EMA", "ema_delay_h"), ("KAMA", "kama_delay_h"), ("SUPERTREND", "supertrend_delay_h"),
+        ("NW", "nw_delay_h"), ("WAVETREND", "wavetrend_delay_h"), ("MAJOR_CONFIRMATION", "major_delay_h"),
+        ("SCORE_THRESHOLD", "score_threshold_delay_h"), ("HYSTERESIS_EXTRA", "hysteresis_extra_delay_h"),
+        ("ALLOCATION_STEP", "allocation_delay_h"),
+    ]
+    faktor_degerleri = {}
+    for isim, kolon in kolon_map:
+        degerler = [s[kolon] for s in yukselis if s[kolon] is not None]
+        faktor_degerleri[isim] = degerler
 
-    print(f"\n{'=' * 70}\nSORU: Guclu yukselisi erken yakalamayi EN COK engelleyen 3 faktor?\n{'=' * 70}")
-    for reason, delays in siralama[:3]:
-        print(f"  - {reason}: ortalama {sum(delays)/len(delays):.1f} saat gecikme ({len(delays)} olayda baskin neden)")
+    print(f"\n{'=' * 78}\nFAKTOR TABLOSU - SADECE BUYUK YUKSELISLER (n={len(yukselis)} olay)\n{'=' * 78}")
+    print(f"{'FAKTOR':<20} {'MEDIAN(sa)':>11} {'ORTALAMA(sa)':>13} {'OLAY SAYISI':>12}")
+    print("-" * 78)
+    for isim, _kolon in kolon_map:
+        degerler = faktor_degerleri[isim]
+        if degerler:
+            print(f"{isim:<20} {statistics.median(degerler):>11.1f} {statistics.mean(degerler):>13.1f} {len(degerler):>12}")
+        else:
+            print(f"{isim:<20} {'n/a':>11} {'n/a':>13} {0:>12}")
+
+    # ============== SANITY CHECK 1: HYSTERESIS_EXTRA makul mu? ==============
+    print(f"\n{'=' * 78}\nSANITY CHECK 1: HYSTERESIS_EXTRA_DELAY makul mu?\n{'=' * 78}")
+    print(f"Sistem her {REBALANCE_HOURS:.2f} saatte bir kontrol ediyor, HYSTERESIS_BARS={HYSTERESIS_BARS} ardisik "
+          f"onay gerekiyor -> HIC SIFIRLAMA (reset_count=0) olan bir olayda beklenen HYSTERESIS_EXTRA_DELAY "
+          f"YAKLASIK {(HYSTERESIS_BARS - 1) * REBALANCE_HOURS:.1f} saat civarinda olmalidir.")
+    tum_olaylar_hyst = [s for s in satirlar if s["hysteresis_extra_delay_h"] is not None]
+    temiz = [s for s in tum_olaylar_hyst if s["hysteresis_reset_count"] == 0]
+    gurultulu = [s for s in tum_olaylar_hyst if s["hysteresis_reset_count"] and s["hysteresis_reset_count"] > 0]
+    if temiz:
+        ort_temiz = sum(s["hysteresis_extra_delay_h"] for s in temiz) / len(temiz)
+        print(f"  reset_count=0 (SAF hysteresis, sinyal hic salinmadi): {len(temiz)} olay, "
+              f"ortalama HYSTERESIS_EXTRA_DELAY = {ort_temiz:.2f} saat (beklenenle {'TUTARLI' if ort_temiz < 3 * REBALANCE_HOURS else 'TUTARSIZ - incele'}).")
+    else:
+        print("  reset_count=0 olan hicbir olay yok (asagidaki 'gurultulu' grup aciklamasina bakin).")
+    if gurultulu:
+        ort_gurultulu = sum(s["hysteresis_extra_delay_h"] for s in gurultulu) / len(gurultulu)
+        ort_reset = sum(s["hysteresis_reset_count"] for s in gurultulu) / len(gurultulu)
+        print(f"  reset_count>0 (HAM sinyal esik civarinda SALINDI, sayac sifirlandi): {len(gurultulu)} olay, "
+              f"ortalama HYSTERESIS_EXTRA_DELAY = {ort_gurultulu:.2f} saat, ortalama reset sayisi = {ort_reset:.1f}.")
+        print("  SONUC: buyuk HYSTERESIS_EXTRA_DELAY degerleri 'hysteresis mekanizmasinin kendisinden' DEGIL,")
+        print("  HAM bilesik skorun esik (+-30) civarinda tekrar tekrar salinip 2-ardisik-onay sayacini")
+        print("  sifirlamasindan kaynaklaniyor - bu bir HYSTERESIS parametresi sorunu degil, ham SKORUN")
+        print("  o bolgede GURULTULU/KARARSIZ olmasi sorunudur.")
+    print("(Not: bu sadece olcum/aciklama - HENUZ hicbir parametre degistirilmedi.)")
+
+    # ============== CEVAP ==============
+    print(f"\n{'=' * 78}\nSORU: Guclu yukselisi erken yakalamayi GERCEKTEN geciktiren ilk 3 mekanizma?\n(MEDIAN'a gore siralanmis - ortalama outlier'lardan etkilenebilir)\n{'=' * 78}")
+    siralama = sorted(
+        ((isim, faktor_degerleri[isim]) for isim, _ in kolon_map if faktor_degerleri[isim]),
+        key=lambda kv: -statistics.median(kv[1]),
+    )
+    for isim, degerler in siralama[:3]:
+        print(f"  - {isim}: median {statistics.median(degerler):.1f} saat (ortalama {statistics.mean(degerler):.1f} saat, n={len(degerler)})")
     if not siralama:
         print("  (Yeterli olay/veri yok - pencereyi buyutmeyi deneyin.)")
     print("\n(Not: bu SADECE teshis - hicbir parametre/strateji degistirilmedi.)")
