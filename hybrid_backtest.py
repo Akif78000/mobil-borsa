@@ -304,7 +304,7 @@ def _grid_only_ozet(days):
     token_degisim = (bitis_coin - baslangic_coin) / baslangic_coin * 100 if baslangic_coin else 0
     max_dusus = teb._max_drawdown(equity_egrisi)
     return {
-        "sistem": "GRID (klasik, tek basina)", "net_getiri": getiri, "brut_getiri": None,
+        "sistem": "GRID", "net_getiri": getiri, "brut_getiri": None,
         "token_degisim": token_degisim, "max_dusus": max_dusus, "islem": len(trades),
         "trend_yakalama_orani": None, "kacirilan_guclu_trend": None, "dogru_rejimle_yakalanan": None,
         "tespit_gecikmesi_saat": None, "yanlis_pozitif_orani": None,
@@ -329,17 +329,22 @@ def _detector_ozet(days, detector):
 
 
 def _master_tablo(satirlar):
-    print(f"\n{'=' * 100}")
+    genislik = 150
+    print(f"\n{'=' * genislik}")
     print("MASTER KARSILASTIRMA (ayni pencere, ayni baslangic sermayesi)")
-    print(f"{'Sistem':<28} {'NET%':>8} {'Token%':>8} {'DD%':>8} {'Islem':>6} {'Yakala%':>8} {'Gecikme(sa)':>11} {'YanlisPoz%':>10}")
-    print("-" * 100)
+    print(f"{'Sistem':<28} {'NET%':>7} {'Token%':>7} {'DD%':>7} {'Islem':>6} {'Yakala%':>8} {'Gecikme(sa)':>11} "
+          f"{'YanlisPoz%':>10} {'KacirilanGuclu':>14} {'GYuksSHIB%':>10} {'GDusUSDT%':>10}")
+    print("-" * genislik)
     for s in satirlar:
         def fmt(v, suffix=""):
             return f"{v:.1f}{suffix}" if v is not None else "n/a"
-        print(f"{s['sistem']:<28} {fmt(s['net_getiri']):>8} {fmt(s['token_degisim']):>8} {fmt(s['max_dusus']):>8} "
+        kacirilan = (f"{s['kacirilan_guclu_trend']}/{s['buyuk_hareket_sayisi']}"
+                     if s.get("kacirilan_guclu_trend") is not None else "n/a")
+        print(f"{s['sistem']:<28} {fmt(s['net_getiri']):>7} {fmt(s['token_degisim']):>7} {fmt(s['max_dusus']):>7} "
               f"{s['islem']:>6} {fmt(s.get('trend_yakalama_orani')):>8} {fmt(s.get('tespit_gecikmesi_saat')):>11} "
-              f"{fmt(s.get('yanlis_pozitif_orani')):>10}")
-    print("=" * 100)
+              f"{fmt(s.get('yanlis_pozitif_orani')):>10} {kacirilan:>14} "
+              f"{fmt(s.get('ort_shib_pct_guclu_yukselis')):>10} {fmt(s.get('ort_usdt_pct_guclu_dusus')):>10}")
+    print("=" * genislik)
 
 
 def run_for_days(days):
@@ -357,7 +362,9 @@ def run_for_days(days):
     shib_series, majors_series, zamanlar, kapanislar = _fetch_hybrid_all(days)
     sonuc = simulate(shib_series, majors_series, zamanlar, kapanislar)
     sonuc_brut = simulate(shib_series, majors_series, zamanlar, kapanislar, cost_percent=0)
-    hybrid_ozet = _ozet(f"HYBRID (grid sleeve %{HYBRID_GRID_SLEEVE_PERCENT} + trend sleeve)", sonuc, sonuc_brut, zamanlar, kapanislar)
+    # Kisa "HYBRID" etiketi tablo hizalamasi icin kullanilir; sleeve detayi
+    # zaten yukarida run_for_days basliginda ayrica basiliyor.
+    hybrid_ozet = _ozet("HYBRID", sonuc, sonuc_brut, zamanlar, kapanislar)
     satirlar.append(hybrid_ozet)
 
     _master_tablo(satirlar)
@@ -393,6 +400,20 @@ def main():
     tum_sonuclar = {}
     for gun in gun_listesi:
         tum_sonuclar[gun] = run_for_days(gun)
+
+    if len(tum_sonuclar) > 1:
+        print(f"\n{'#' * 62}\nCAPRAZ-PENCERE NET GETIRI TABLOSU (sistem x gun)\n{'#' * 62}")
+        sistem_adlari = [s["sistem"] for s in next(iter(tum_sonuclar.values()))]
+        baslik = f"{'SISTEM':<28}" + "".join(f"{str(g) + 'g NET%':>12}" for g in gun_listesi)
+        print(baslik)
+        print("-" * len(baslik))
+        for isim in sistem_adlari:
+            satir = f"{isim:<28}"
+            for gun in gun_listesi:
+                s = next((x for x in tum_sonuclar[gun] if x["sistem"] == isim), None)
+                deger = s["net_getiri"] if s and s["net_getiri"] is not None else None
+                satir += f"{(f'{deger:+.1f}' if deger is not None else 'n/a'):>12}"
+            print(satir)
 
     if len(tum_sonuclar) > 1:
         print(f"\n{'#' * 62}\nHYBRID TUTARLILIK OZETI (uc pencerede ayni mi?)\n{'#' * 62}")
