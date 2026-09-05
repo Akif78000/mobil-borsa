@@ -55,6 +55,55 @@ GRID_WIDE_STEP_UP_PERCENT = float(os.environ.get("GRID_WIDE_STEP_UP_PERCENT", "5
 GRID_WIDE_LOT_STOP_PERCENT = float(os.environ.get("GRID_WIDE_LOT_STOP_PERCENT", "10"))
 GRID_WIDE_ORDER_PERCENT = float(os.environ.get("GRID_WIDE_ORDER_PERCENT", "10"))
 GRID_WIDE_MAX_OPEN_LOTS = int(os.environ.get("GRID_WIDE_MAX_OPEN_LOTS", "8"))
+# trade_bot.py'deki RSI+EMA trend mantiginin (saf fiyat yuzdesi degil, gercek
+# RSI + kisa/uzun EMA kesisimi) backtest karsiligi - seed'in bu yuzdesi, ayri
+# ic sayaclari olan bagimsiz bir alt-havuzda calisir. Saatlik mumlara resample
+# edilmis kapanislar uzerinden RSI(GRID_RSI_PERIOD) ve EMA(kisa)/EMA(uzun)
+# hesaplanir: trend YUKARI (ema_kisa > ema_uzun) VE RSI <= ALIM esigindeyse
+# (geri cekilme) AL; trend kirilirsa VEYA RSI >= SATIS esigine cikarsa SAT.
+GRID_RSI_TREND_ALLOCATION_PERCENT = float(os.environ.get("GRID_RSI_TREND_ALLOCATION_PERCENT", "0"))
+GRID_RSI_PERIOD = int(os.environ.get("GRID_RSI_PERIOD", "14"))
+GRID_RSI_BUY_THRESHOLD = float(os.environ.get("GRID_RSI_BUY_THRESHOLD", "40"))
+GRID_RSI_SELL_THRESHOLD = float(os.environ.get("GRID_RSI_SELL_THRESHOLD", "65"))
+GRID_RSI_EMA_SHORT_HOURS = int(os.environ.get("GRID_RSI_EMA_SHORT_HOURS", "12"))
+GRID_RSI_EMA_LONG_HOURS = int(os.environ.get("GRID_RSI_EMA_LONG_HOURS", "48"))
+
+
+def _rsi_series(closes, period):
+    """trade_bot.py'deki rsi_hesapla ile ayni tanim (son `period` kazanc/kayip
+    ortalamasi), ama O(n) - her adimda tum listeyi yeniden taramaz."""
+    n = len(closes)
+    result = [None] * n
+    if n < period + 1:
+        return result
+    gains = [0.0] * n
+    losses = [0.0] * n
+    for i in range(1, n):
+        fark = closes[i] - closes[i - 1]
+        gains[i] = fark if fark > 0 else 0.0
+        losses[i] = -fark if fark < 0 else 0.0
+    pencere_kazanc = sum(gains[1:period + 1])
+    pencere_kayip = sum(losses[1:period + 1])
+    result[period] = 100.0 if pencere_kayip == 0 else 100 - (100 / (1 + (pencere_kazanc / pencere_kayip)))
+    for i in range(period + 1, n):
+        pencere_kazanc += gains[i] - gains[i - period]
+        pencere_kayip += losses[i] - losses[i - period]
+        result[i] = 100.0 if pencere_kayip == 0 else 100 - (100 / (1 + (pencere_kazanc / pencere_kayip)))
+    return result
+
+
+def _ema_series(closes, period):
+    n = len(closes)
+    result = [None] * n
+    if n < period:
+        return result
+    ema = sum(closes[:period]) / period
+    result[period - 1] = ema
+    k = 2 / (period + 1)
+    for i in range(period, n):
+        ema = closes[i] * k + ema * (1 - k)
+        result[i] = ema
+    return result
 
 
 def simulate(kapanislar, zamanlar):
@@ -101,6 +150,18 @@ def simulate(kapanislar, zamanlar):
             usdt -= wide_value
             wide_pool = {"reference_price": kapanislar[0], "open_lots": [], "qty_usdt": wide_value}
 
+    rsi_trend_pool = None
+    if GRID_RSI_TREND_ALLOCATION_PERCENT > 0:
+        rsi_value = BACKTEST_START_CAPITAL * (GRID_RSI_TREND_ALLOCATION_PERCENT / 100)
+        if START_IN_SHIB:
+            rsi_qty = rsi_value / kapanislar[0]
+            open_lots[0]["qty"] -= rsi_qty
+            open_lots[0]["quote_spent"] -= rsi_value
+            rsi_trend_pool = {"position": "long", "qty_shib": rsi_qty, "qty_usdt": 0.0}
+        else:
+            usdt -= rsi_value
+            rsi_trend_pool = {"position": "flat", "qty_shib": 0.0, "qty_usdt": rsi_value}
+
     referans_fiyat = kapanislar[0]
     trades = []
     equity_egrisi = []
@@ -108,6 +169,11 @@ def simulate(kapanislar, zamanlar):
     rezerv = BACKTEST_START_CAPITAL * (GRID_RESERVE_PERCENT / 100)
     candles_per_hour = max(1, round(3_600_000 / INTERVAL_MS[GRID_KLINE_INTERVAL]))
     candles_per_day = max(1, round(86_400_000 / INTERVAL_MS[GRID_KLINE_INTERVAL]))
+
+    saatlik_kapanislar = kapanislar[::candles_per_hour]
+    saatlik_rsi = _rsi_series(saatlik_kapanislar, GRID_RSI_PERIOD)
+    saatlik_ema_kisa = _ema_series(saatlik_kapanislar, GRID_RSI_EMA_SHORT_HOURS)
+    saatlik_ema_uzun = _ema_series(saatlik_kapanislar, GRID_RSI_EMA_LONG_HOURS)
 
     for i, fiyat in enumerate(kapanislar):
         tarih = time.strftime("%Y-%m-%d %H:%M", time.localtime(zamanlar[i] / 1000))
@@ -150,6 +216,36 @@ def simulate(kapanislar, zamanlar):
                     trend_pool["qty_shib"] = qty
                     trend_pool["qty_usdt"] = 0.0
                     trend_pool["position"] = "long"
+
+        if rsi_trend_pool is not None:
+            saat_idx = min(i // candles_per_hour, len(saatlik_kapanislar) - 1)
+            rsi_deger = saatlik_rsi[saat_idx]
+            ema_kisa = saatlik_ema_kisa[saat_idx]
+            ema_uzun = saatlik_ema_uzun[saat_idx]
+            trend_yukari = ema_kisa is not None and ema_uzun is not None and ema_kisa > ema_uzun
+            if rsi_deger is not None:
+                if rsi_trend_pool["position"] == "long":
+                    exit_tetik = (not trend_yukari) or (rsi_deger >= GRID_RSI_SELL_THRESHOLD)
+                    if exit_tetik and rsi_trend_pool["qty_shib"] > 0:
+                        brut = rsi_trend_pool["qty_shib"] * fiyat
+                        net = brut * (1 - TRADING_FEE_PERCENT / 100)
+                        usdt += net
+                        coin -= rsi_trend_pool["qty_shib"]
+                        trades.append({"tip": "RSI_SAT", "tarih": tarih, "fiyat": fiyat})
+                        rsi_trend_pool["qty_usdt"] = net
+                        rsi_trend_pool["qty_shib"] = 0.0
+                        rsi_trend_pool["position"] = "flat"
+                else:
+                    entry_tetik = trend_yukari and rsi_deger <= GRID_RSI_BUY_THRESHOLD
+                    if entry_tetik and rsi_trend_pool["qty_usdt"] > 0:
+                        alim_ucreti = rsi_trend_pool["qty_usdt"] * TRADING_FEE_PERCENT / 100
+                        qty = (rsi_trend_pool["qty_usdt"] - alim_ucreti) / fiyat
+                        usdt -= rsi_trend_pool["qty_usdt"]
+                        coin += qty
+                        trades.append({"tip": "RSI_AL", "tarih": tarih, "fiyat": fiyat})
+                        rsi_trend_pool["qty_shib"] = qty
+                        rsi_trend_pool["qty_usdt"] = 0.0
+                        rsi_trend_pool["position"] = "long"
 
         if wide_pool is not None:
             wide_satis_yapildi = False
@@ -217,10 +313,10 @@ def simulate(kapanislar, zamanlar):
         equity_egrisi.append(usdt + coin * fiyat)
         coin_egrisi.append(coin + usdt / fiyat)
 
-    return trades, equity_egrisi, coin_egrisi, baslangic_coin_esdeger, len(open_lots), trend_pool, wide_pool
+    return trades, equity_egrisi, coin_egrisi, baslangic_coin_esdeger, len(open_lots), trend_pool, wide_pool, rsi_trend_pool
 
 
-def ozet_yazdir(trades, equity_egrisi, coin_egrisi, baslangic_coin, acik_lot_sayisi, mum_sayisi, trend_pool=None, wide_pool=None):
+def ozet_yazdir(trades, equity_egrisi, coin_egrisi, baslangic_coin, acik_lot_sayisi, mum_sayisi, trend_pool=None, wide_pool=None, rsi_trend_pool=None):
     toplam_deger = equity_egrisi[-1] if equity_egrisi else BACKTEST_START_CAPITAL
     getiri_yuzde = (toplam_deger - BACKTEST_START_CAPITAL) / BACKTEST_START_CAPITAL * 100
 
@@ -250,6 +346,10 @@ def ozet_yazdir(trades, equity_egrisi, coin_egrisi, baslangic_coin, acik_lot_say
     if GRID_WIDE_ALLOCATION_PERCENT > 0:
         print(f"GENIS GRID: seed'in %{GRID_WIDE_ALLOCATION_PERCENT} - adim=%{GRID_WIDE_STEP_DOWN_PERCENT}/"
               f"%{GRID_WIDE_STEP_UP_PERCENT} stop=%{GRID_WIDE_LOT_STOP_PERCENT} maks_lot={GRID_WIDE_MAX_OPEN_LOTS}")
+    if GRID_RSI_TREND_ALLOCATION_PERCENT > 0:
+        print(f"RSI TREND HAVUZU: seed'in %{GRID_RSI_TREND_ALLOCATION_PERCENT} - "
+              f"RSI({GRID_RSI_PERIOD}) al<=%{GRID_RSI_BUY_THRESHOLD} sat>=%{GRID_RSI_SELL_THRESHOLD}, "
+              f"EMA(1sa) kisa={GRID_RSI_EMA_SHORT_HOURS}sa uzun={GRID_RSI_EMA_LONG_HOURS}sa")
     print("=" * 56)
     print(f"Baslangic sermaye      : {BACKTEST_START_CAPITAL:,.2f} USDT")
     print(f"Bitis degeri            : {toplam_deger:,.2f} USDT")
@@ -276,6 +376,12 @@ def ozet_yazdir(trades, equity_egrisi, coin_egrisi, baslangic_coin, acik_lot_say
         print(f"Genis grid son durum    : {len(wide_pool['open_lots'])} acik lot "
               f"({wide_shib:,.0f} {SYMBOL.replace('USDT', '')}) / {wide_pool['qty_usdt']:,.2f} USDT, "
               f"{len(wide_islem)} genis grid islemi")
+    if rsi_trend_pool is not None:
+        rsi_islem = [t for t in trades if t["tip"] in ("RSI_AL", "RSI_SAT")]
+        print("-" * 56)
+        print(f"RSI trend havuzu son durum: {rsi_trend_pool['position']} "
+              f"({rsi_trend_pool['qty_shib']:,.0f} {SYMBOL.replace('USDT', '')} / "
+              f"{rsi_trend_pool['qty_usdt']:,.2f} USDT), {len(rsi_islem)} RSI islemi")
     print("=" * 56)
 
     if token_degisim > 0:
@@ -298,8 +404,8 @@ def main():
     candles = fetch_history(SYMBOL, GRID_KLINE_INTERVAL, BACKTEST_DAYS)
     kapanislar = [float(c[4]) for c in candles]
     zamanlar = [c[0] for c in candles]
-    trades, equity_egrisi, coin_egrisi, baslangic_coin, acik_lot_sayisi, trend_pool, wide_pool = simulate(kapanislar, zamanlar)
-    ozet_yazdir(trades, equity_egrisi, coin_egrisi, baslangic_coin, acik_lot_sayisi, len(candles), trend_pool, wide_pool)
+    trades, equity_egrisi, coin_egrisi, baslangic_coin, acik_lot_sayisi, trend_pool, wide_pool, rsi_trend_pool = simulate(kapanislar, zamanlar)
+    ozet_yazdir(trades, equity_egrisi, coin_egrisi, baslangic_coin, acik_lot_sayisi, len(candles), trend_pool, wide_pool, rsi_trend_pool)
 
 
 if __name__ == "__main__":
