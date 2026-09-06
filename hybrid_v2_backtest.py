@@ -193,7 +193,7 @@ def _v2_target_allocation(etkin_regime, guc_0_100, prev_target):
     return alt + (ust - alt) * oran
 
 
-def _trend_sleeve_rebalance(trend_usdt, trend_coin, target, fiyat, cost_pct, trades, tarih, min_delta):
+def _trend_sleeve_rebalance(trend_usdt, trend_coin, target, fiyat, cost_pct, trades, tarih, min_delta, ts_ms=None):
     """hb.simulate()'in trend-sleeve rebalance blogunun AYNI formulleri -
     hb.py DEGISTIRILEMEDIGI icin (v1'e dokunma kurali) burada YENIDEN
     yazildi, ama mantik BIREBIR ayni (hesap hatasi riskini azaltmak icin
@@ -212,14 +212,14 @@ def _trend_sleeve_rebalance(trend_usdt, trend_coin, target, fiyat, cost_pct, tra
             maliyet = harcanacak * cost_pct / 100
             trend_usdt -= harcanacak
             trend_coin += (harcanacak - maliyet) / fiyat
-            trades.append({"tip": "TREND_SLEEVE_AL", "tarih": tarih, "fiyat": fiyat})
+            trades.append({"tip": "TREND_SLEEVE_AL", "tarih": tarih, "fiyat": fiyat, "ts_ms": ts_ms, "usdt_tutari": harcanacak})
     else:
         satilacak = min(trend_coin, -delta_deger / fiyat)
         if satilacak > 0:
             net = satilacak * fiyat * (1 - cost_pct / 100)
             trend_usdt += net
             trend_coin -= satilacak
-            trades.append({"tip": "TREND_SLEEVE_SAT", "tarih": tarih, "fiyat": fiyat})
+            trades.append({"tip": "TREND_SLEEVE_SAT", "tarih": tarih, "fiyat": fiyat, "ts_ms": ts_ms, "usdt_tutari": net})
     return trend_usdt, trend_coin
 
 
@@ -248,13 +248,21 @@ def simulate_v2(shib_series, majors_series, early_series, zamanlar, kapanislar, 
     v1_by_idx = {t["idx"]: t for t in v1_hysteresis_gecmisi}
 
     trades, equity_egrisi, coin_egrisi, shib_pct_gecmisi = [], [], [], []
+    grid_pct_gecmisi, trend_pct_gecmisi = [], []
     regime_gecmisi, early_gecmisi = [], []
 
     for i, fiyat in enumerate(kapanislar):
         tarih = time.strftime("%Y-%m-%d %H:%M", time.localtime(zamanlar[i] / 1000))
         karar_zamani = zamanlar[i] + base_interval_ms
 
+        # TESHIS AMACLI (strateji karari DEGISMEZ): hb._grid_sleeve_step
+        # DEGISTIRILEMEDIGI (v1 dosyasi) icin, ekledigi trade(ler)e buradan
+        # zaman damgasi "yamaniyor" - sadece raporlama icin, hicbir islem
+        # mantigini etkilemez.
+        _n_once = len(trades)
         hb._grid_sleeve_step(grid_state, fiyat, tarih, trades, cost_pct)
+        for _t in trades[_n_once:]:
+            _t["ts_ms"] = zamanlar[i]
 
         if i % steps_per_rebalance == 0:
             v1_tick = v1_by_idx.get(i)
@@ -271,29 +279,45 @@ def simulate_v2(shib_series, majors_series, early_series, zamanlar, kapanislar, 
 
             guc = (early_guc * 100) if etkin_regime in ("ERKEN_YUKSELIS", "ERKEN_DUSUS") else abs(confirmed_score)
             hedef_raw = _v2_target_allocation(etkin_regime, guc, trend_target)
+            prev_trend_target = trend_target
+            capped_by_step = False
             if hedef_raw is not None:
-                trend_target = (hedef_raw if etkin_regime == "TOPARLANMA"
-                                 else pm.smooth_target(trend_target, hedef_raw, hb.HYBRID_MAX_STEP_PERCENT))
+                if etkin_regime == "TOPARLANMA":
+                    trend_target = hedef_raw
+                else:
+                    trend_target = pm.smooth_target(trend_target, hedef_raw, hb.HYBRID_MAX_STEP_PERCENT)
+                    capped_by_step = abs(hedef_raw - prev_trend_target) > hb.HYBRID_MAX_STEP_PERCENT + 1e-9
 
             trend_usdt, trend_coin = _trend_sleeve_rebalance(
-                trend_usdt, trend_coin, trend_target, fiyat, cost_pct, trades, tarih, hb.HYBRID_MIN_REBALANCE_DELTA)
+                trend_usdt, trend_coin, trend_target, fiyat, cost_pct, trades, tarih,
+                hb.HYBRID_MIN_REBALANCE_DELTA, ts_ms=karar_zamani)
 
             regime_gecmisi.append((i, karar_zamani, confirmed_regime, confirmed_score, trend_target))
-            early_gecmisi.append({"idx": i, "ts_ms": karar_zamani, "early_dir": early_dir,
-                                   "early_guc": round(early_guc, 3), "etkin_regime": etkin_regime,
-                                   "trend_target": round(trend_target, 2)})
+            early_gecmisi.append({
+                "idx": i, "ts_ms": karar_zamani, "early_dir": early_dir,
+                "early_guc": round(early_guc, 3), "etkin_regime": etkin_regime,
+                "confirmed_regime": confirmed_regime, "hedef_raw": round(hedef_raw, 2) if hedef_raw is not None else None,
+                "trend_target": round(trend_target, 2), "capped_by_step": capped_by_step,
+            })
 
         toplam_usdt = grid_state["usdt"] + trend_usdt
         toplam_coin = grid_state["coin"] + trend_coin
         toplam_deger = toplam_usdt + toplam_coin * fiyat
         actual_pct = (toplam_coin * fiyat / toplam_deger * 100) if toplam_deger > 0 else 0.0
+        grid_deger_simdi = grid_state["usdt"] + grid_state["coin"] * fiyat
+        grid_pct = (grid_state["coin"] * fiyat / grid_deger_simdi * 100) if grid_deger_simdi > 0 else 0.0
+        trend_deger_simdi = trend_usdt + trend_coin * fiyat
+        trend_pct = (trend_coin * fiyat / trend_deger_simdi * 100) if trend_deger_simdi > 0 else 0.0
         equity_egrisi.append(toplam_deger)
         coin_egrisi.append(toplam_coin + toplam_usdt / fiyat)
         shib_pct_gecmisi.append(actual_pct)
+        grid_pct_gecmisi.append(grid_pct)
+        trend_pct_gecmisi.append(trend_pct)
 
     return {
         "trades": trades, "equity_egrisi": equity_egrisi, "coin_egrisi": coin_egrisi,
         "baslangic_coin": baslangic_coin_esdeger, "shib_pct_gecmisi": shib_pct_gecmisi,
+        "grid_pct_gecmisi": grid_pct_gecmisi, "trend_pct_gecmisi": trend_pct_gecmisi,
         "regime_gecmisi": regime_gecmisi, "early_gecmisi": early_gecmisi,
     }
 
