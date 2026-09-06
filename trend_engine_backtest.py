@@ -50,6 +50,11 @@ MAX_STEP_PERCENT = float(os.environ.get("ENGINE_MAX_STEP_PERCENT", "10"))
 MIN_REBALANCE_DELTA_PERCENT = float(os.environ.get("ENGINE_MIN_REBALANCE_DELTA", "5"))
 BIG_MOVE_THRESHOLD_PERCENT = float(os.environ.get("ENGINE_BIG_MOVE_THRESHOLD", "5"))
 BIG_MOVE_WINDOW_HOURS = float(os.environ.get("ENGINE_BIG_MOVE_WINDOW_HOURS", "24"))
+# hybrid_diagnostic.py / hybrid_v2_allocation_diagnostic.py'de ZATEN kullanilan
+# AYNI 120 saatlik tarama ufku - "Trend Tespit Gecikmesi" hesabinin bir
+# olayin ILGISIZ, cok sonraki bir baska olayin tespitini kendi gecikmesi
+# sanmasini onlemek icin (bkz. _trend_metrics). Yeni bir sayi UYDURULMADI.
+SCAN_HORIZON_HOURS = 120
 
 # EMA(50)/KAMA(30)/SuperTrend(10)/ADX(14) gibi gostergelerin "isinmasi" icin
 # zaman dilimi basina gereken ekstra gecmis gun sayisi (bkz. onceki surumde
@@ -259,7 +264,7 @@ def _trend_metrics(zamanlar, kapanislar, shib_pct_gecmisi, regime_gecmisi):
     kacirilan_yukselis = 0
     onlenemeyen_dusus = 0
     dogru_rejimle_yakalanan = 0  # capture_frac >= %50: hareketin COGUNLUGUNDE dogru tarafta
-    for start, end, yon, _degisim in events:
+    for k, (start, end, yon, _degisim) in enumerate(events):
         pencere = shib_pct_gecmisi[start:end + 1]
         dogru_taraf = [(p > 50) if yon == "YUKARI" else (p < 50) for p in pencere]
         capture_frac = sum(dogru_taraf) / len(dogru_taraf) if dogru_taraf else 0.0
@@ -277,11 +282,26 @@ def _trend_metrics(zamanlar, kapanislar, shib_pct_gecmisi, regime_gecmisi):
             else:
                 onlenemeyen_dusus += 1
 
+        # METODOLOJI DUZELTMESI (bkz. commit mesaji): lag aramasi ONCEDEN
+        # HORIZON SINIRSIZDI - bir olay hic gercekten tespit edilmemis olsa
+        # bile, dongu regime_gecmisi'nin SONUNA kadar taranip, TAMAMEN
+        # ILGISIZ, cok daha SONRAKI bir olayin kendi tespitini bu olayin
+        # "gecikmesi" sayabiliyordu (olaylar arasi CAPRAZ-BULASMA). Simdi
+        # arama, SCAN_HORIZON_HOURS (mevcut teshis script'lerindeki (bkz.
+        # hybrid_diagnostic.py) AYNI 120 saatlik konvansiyon - yeni sayi
+        # uydurulmadi) VEYA bir SONRAKI olayin baslangici (hangisi ONCE
+        # gelirse) ile SINIRLANIYOR - o noktadan sonraki herhangi bir
+        # rejim eslesmesi ARTIK BU olaya degil, sonraki olaya ait sayilir.
+        sinir_ms = zamanlar[start] + SCAN_HORIZON_HOURS * 3_600_000
+        if k + 1 < len(events):
+            sinir_ms = min(sinir_ms, zamanlar[events[k + 1][0]])
         hedef_regimeler = {"YUKSELIS", "GUCLU_YUKSELIS"} if yon == "YUKARI" else {"DUSUS", "GUCLU_DUSUS"}
         lag_saat = None
         for idx, ts, regime, _score, _target in regime_gecmisi:
             if idx < start:
                 continue
+            if ts > sinir_ms:
+                break
             if regime in hedef_regimeler:
                 lag_saat = (ts - zamanlar[start]) / 3_600_000
                 break
