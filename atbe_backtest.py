@@ -85,10 +85,22 @@ ATBE_BACKTEST_DAYS_LIST = [int(g.strip()) for g in os.environ.get("ATBE_BACKTEST
 OUTPUT_DIR = os.environ.get("ATBE_OUTPUT_DIR", "atbe_reports")
 
 
-def simulate_atbe(shib_series, majors_series, zamanlar, kapanislar, core_pct, cost_percent=None):
+def simulate_atbe(shib_series, majors_series, zamanlar, kapanislar, core_pct, cost_percent=None,
+                   booster_execution_enabled=True, coordinator_enabled=True):
     """CORE (grid, core_pct%) + BOOSTER (atbe_engine, 100-core_pct%) - iki
     AYRI sleeve, HICBIR ortak havuz yok (booster ASLA core'un parasina
-    erisemez, core ASLA booster mantigini calistirmaz)."""
+    erisemez, core ASLA booster mantigini calistirmaz).
+
+    booster_execution_enabled=False (PARITY/AUDIT testleri icin, atbe_parity_
+    test.py'nin 'SHADOW BOOSTER' testi - madde 2): booster STATE/EVIDENCE
+    HESAPLANMAYA devam eder (abe.step cagrilir, shib_series/majors_series
+    GERCEKTEN okunur) ama trade EXECUTION blogu tamamen atlanir - booster
+    parasi/pozisyonu HICBIR ZAMAN degismez. Bu, 'booster sinyal hesaplamasi
+    core path'i etkiliyor mu' sorusunu (paylasilan mutable state/yan etki
+    olmadigini) izole eder.
+    coordinator_enabled=False (madde 3 testi icin): coordinator hic
+    cagrilmaz - booster (varsa) her zaman should_execute'un izin verdigi
+    gibi calisir, self-cross kontrolu YOK."""
     cost_pct = (TRADING_FEE_PERCENT + SLIPPAGE_PERCENT) if cost_percent is None else cost_percent
     core_deger = BACKTEST_START_CAPITAL * (core_pct / 100)
     booster_deger = BACKTEST_START_CAPITAL - core_deger
@@ -162,16 +174,31 @@ def simulate_atbe(shib_series, majors_series, zamanlar, kapanislar, core_pct, co
 
             booster_deger_simdi = booster_usdt + booster_coin * fiyat
             actual_booster_pct = (booster_coin * fiyat / booster_deger_simdi * 100) if booster_deger_simdi > 0 else 0.0
-            gap_notional = abs(yeni_target - actual_booster_pct) / 100.0 * booster_deger_simdi
 
-            side_istenen = "AL" if yeni_target > actual_booster_pct else "SAT"
-            coordinator_izinli = coordinator.booster_trade_izinli_mi(side_istenen, gap_notional, karar_zamani, is_risk_reduction)
-
+            # KOK NEDEN DUZELTMESI (kullanicinin parity/audit talebi, madde 3):
+            # coordinator ONCEDEN (should_execute'DAN ONCE) HER ciplak gap icin
+            # cagriliyordu - deadband/ekonomik-esik/turnover-butcesi yuzunden
+            # ZATEN gerceklesmeyecek olan (notional=0'a yakin/ekonomik olmayan)
+            # bir "niyet" bile self-cross olarak SAYILIP booster'i gereksiz
+            # yere bastiriyordu (gercek olmayan bir celiski olcuyordu). Simdi
+            # ONCE should_execute ile GERCEKTEN yapilacak islem belirleniyor,
+            # coordinator SADECE bu gercek/ekonomik islem icin, VE notional>0
+            # ise devreye giriyor - boylece "booster trade yoksa SUPPRESSED
+            # CORE TRADE = 0 olmali" VE "coordinator sadece gercek booster
+            # emriyle ekonomik overlap varsa devreye girmeli" sartlari saglanir.
             execute, gap, atlama_sebebi = aa.should_execute(
                 actual_booster_pct, yeni_target, ticks_since_last_booster_trade, is_risk_reduction,
                 booster_deger_simdi, turnover_tracker, karar_zamani)
-            if not coordinator_izinli:
-                execute, atlama_sebebi = False, "COORDINATOR_SUPPRESSED"
+
+            if not booster_execution_enabled:
+                execute, atlama_sebebi = False, "SHADOW_MODE"
+            elif execute and coordinator_enabled:
+                gercek_notional = abs(gap) / 100.0 * booster_deger_simdi
+                if gercek_notional > 0:
+                    side_istenen = "AL" if yeni_target > actual_booster_pct else "SAT"
+                    coordinator_izinli = coordinator.booster_trade_izinli_mi(side_istenen, gercek_notional, karar_zamani, is_risk_reduction)
+                    if not coordinator_izinli:
+                        execute, atlama_sebebi = False, "COORDINATOR_SUPPRESSED"
 
             booster_target = yeni_target
             assert 0.0 - 1e-6 <= booster_target <= 100.0 + 1e-6
@@ -226,10 +253,19 @@ def simulate_atbe(shib_series, majors_series, zamanlar, kapanislar, core_pct, co
         toplam_coin = grid_state["coin"] + booster_coin
         toplam_deger = toplam_usdt + toplam_coin * fiyat
         assert toplam_deger >= -1e-6
+        core_bar = grid_state["usdt"] + grid_state["coin"] * fiyat
+        booster_bar = booster_usdt + booster_coin * fiyat
+        # SLEEVE ACCOUNTING IDENTITY (madde 4/11): toplam deger, INSA GEREGI
+        # (toplam_usdt/toplam_coin literal TOPLAMLAR oldugu icin) core+booster'a
+        # TAM esit olmak ZORUNDA - ayni SHIB stogunun iki sleeve tarafindan
+        # cift sayilmasi/karismasi MUMKUN DEGIL (iki ayri degisken, hicbir
+        # ortak havuz yok). Float rounding disinda sapma OLURSA gercek bir
+        # accounting hatasidir.
+        assert abs(toplam_deger - (core_bar + booster_bar)) < 1e-6
         equity_egrisi.append(toplam_deger)
         coin_egrisi.append(toplam_coin + toplam_usdt / fiyat)
-        core_equity_bar.append(grid_state["usdt"] + grid_state["coin"] * fiyat)
-        booster_equity_bar.append(booster_usdt + booster_coin * fiyat)
+        core_equity_bar.append(core_bar)
+        booster_equity_bar.append(booster_bar)
 
     return {
         "trades": trades, "equity_egrisi": equity_egrisi, "coin_egrisi": coin_egrisi,
