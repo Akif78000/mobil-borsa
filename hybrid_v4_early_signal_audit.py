@@ -216,16 +216,32 @@ def main():
               f"{f(kama_p):>7} {f(st_p):>7} {f(majors_p):>8} {(statistics.mean(sureler) if sureler else float('nan')):>13.1f}")
 
     # ============== 4 SORUYA DOGRUDAN CEVAP ==============
+    # ONEMLI DUZELTME: "yanlis" (basarisiz+gurultu) grubunun bilesen-uyum
+    # oranlari, FAILED_REVERSED (buyuk n) ile NOISE_FLAT (kucuk n) grup
+    # YUZDELERININ DUZ ORTALAMASI (statistics.mean) DEGIL, OLAY SAYISINA
+    # GORE AGIRLIKLI ortalamasi olmali - iki grubun n'i cok farkliysa
+    # (orn. 53 vs 5) duz ortalama kucuk grubun rastgele degerine asiri
+    # agirlik verip yanlis sonuc uretebilir (bu hata ilk surumde vardi ve
+    # duzeltildi - bkz. commit mesaji).
     print(f"\n{'=' * 108}\nFEATURE SEPARATION - 4 SORUYA DOGRUDAN CEVAP\n{'=' * 108}")
     faydali = ozet.get("USEFUL_BIG_MOVE")
     yanlis_gruplari = [g for k, g in ozet.items() if k in ("FAILED_REVERSED", "NOISE_FLAT")]
+
+    def _agirlikli_ortalama(kolon):
+        toplam_n, toplam_deger = 0, 0.0
+        for g in yanlis_gruplari:
+            if g[kolon] is not None:
+                toplam_n += g["n"]
+                toplam_deger += g[kolon] * g["n"]
+        return (toplam_deger / toplam_n) if toplam_n else None
+
     if faydali and yanlis_gruplari:
-        yanlis_ema = statistics.mean([g["ema"] for g in yanlis_gruplari if g["ema"] is not None]) if any(g["ema"] is not None for g in yanlis_gruplari) else None
-        yanlis_wt = statistics.mean([g["wt"] for g in yanlis_gruplari if g["wt"] is not None]) if any(g["wt"] is not None for g in yanlis_gruplari) else None
-        yanlis_nw = statistics.mean([g["nw"] for g in yanlis_gruplari if g["nw"] is not None]) if any(g["nw"] is not None for g in yanlis_gruplari) else None
-        yanlis_kama = statistics.mean([g["kama"] for g in yanlis_gruplari if g["kama"] is not None]) if any(g["kama"] is not None for g in yanlis_gruplari) else None
-        yanlis_st = statistics.mean([g["st"] for g in yanlis_gruplari if g["st"] is not None]) if any(g["st"] is not None for g in yanlis_gruplari) else None
-        yanlis_majors = statistics.mean([g["majors"] for g in yanlis_gruplari if g["majors"] is not None]) if any(g["majors"] is not None for g in yanlis_gruplari) else None
+        yanlis_ema = _agirlikli_ortalama("ema")
+        yanlis_wt = _agirlikli_ortalama("wt")
+        yanlis_nw = _agirlikli_ortalama("nw")
+        yanlis_kama = _agirlikli_ortalama("kama")
+        yanlis_st = _agirlikli_ortalama("st")
+        yanlis_majors = _agirlikli_ortalama("majors")
 
         print(f"1) Faydali girislerde EMA/WT/NW birlikte oy verme orani : EMA=%{faydali['ema']:.0f} WT=%{faydali['wt']:.0f} NW=%{faydali['nw']:.0f}"
               if faydali['ema'] is not None else "1) veri yok")
