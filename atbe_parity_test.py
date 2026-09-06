@@ -106,8 +106,24 @@ def _replicate_core_only(zamanlar, kapanislar, baslangic_sermaye, cost_pct):
     - ATBE'nin production simulate_atbe() ile AYNI cagri deseni, ama bu
     fonksiyon her trade ONCESI/SONRASI durumu ACIKCA kaydeder (parite CSV'si
     icin)."""
-    state = {"usdt": baslangic_sermaye, "coin": 0.0, "open_lots": [],
-              "reference_price": kapanislar[0], "baslangic_deger": baslangic_sermaye}
+    # KOK NEDEN DUZELTMESI (gercek veriyle TEST A/B'nin trade #0'da ANINDA
+    # ayrilmasi uzerine bulundu): standalone gb.simulate() VE production
+    # atbb.simulate_atbe() ikisi de START_IN_SHIB (.env) ayarina gore
+    # BASLANGIC durumunu dallandirir - bu fonksiyon bunu ONCEDEN
+    # kontrol ETMIYORDU, HER ZAMAN nakitle basliyordu. Kullanicinin canli
+    # bot .env'i START_IN_SHIB=true ise (zaten SHIB'de baslayan bir bot),
+    # bu tek basina TUM sonraki trade dizisini kaydiriyordu - bu bir ATBE
+    # PRODUCTION bug'i DEGIL, SADECE bu test yardimcisinin eksik dalıydı
+    # (nitekim TEST C/D, GERCEK simulate_atbe() STARTIN_SHIB'i DOGRU
+    # isledigi icin, ayni veride tam eslesti).
+    if gb.START_IN_SHIB:
+        coin0 = baslangic_sermaye / kapanislar[0]
+        state = {"usdt": 0.0, "coin": coin0,
+                  "open_lots": [{"qty": coin0, "entry_price": kapanislar[0]}],
+                  "reference_price": kapanislar[0], "baslangic_deger": baslangic_sermaye}
+    else:
+        state = {"usdt": baslangic_sermaye, "coin": 0.0, "open_lots": [],
+                  "reference_price": kapanislar[0], "baslangic_deger": baslangic_sermaye}
     trades, equity_egrisi, coin_egrisi = [], [], []
     for i, fiyat in enumerate(kapanislar):
         tarih = _tarih(zamanlar[i])
