@@ -159,6 +159,20 @@ def _fmt(ts_ms):
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts_ms / 1000)) if ts_ms is not None else None
 
 
+def _percentile(degerler, p):
+    """Bagimlilik eklemeden (numpy yok) dogrusal enterpolasyonlu yuzdelik dilim."""
+    if not degerler:
+        return None
+    s = sorted(degerler)
+    if len(s) == 1:
+        return s[0]
+    k = (len(s) - 1) * (p / 100)
+    f, c = int(k), min(int(k) + 1, len(s) - 1)
+    if f == c:
+        return s[f]
+    return s[f] + (s[c] - s[f]) * (k - f)
+
+
 def main():
     print(f"[TESHIS] Veri cekiliyor: SHIBUSDT + BTC/ETH/BNB, son {BACKTEST_DAYS} gun...")
     shib_series, majors_series, zamanlar, kapanislar = hb._fetch_hybrid_all(BACKTEST_DAYS)
@@ -241,6 +255,16 @@ def main():
             j = start_idx + steps
             return shib_pct_gecmisi[j] if 0 <= j < len(shib_pct_gecmisi) else None
 
+        t_score_ms = event_start_ms + score_h * 3_600_000 if score_h is not None else None
+        shib_pct_24h = pct_at(24)
+        # "TAMAMEN KACIRILDI": 24 saat sonra bile beklenen tarafa fiilen
+        # gecilmemis (yukseliste hala SHIB azinlikta / duruste hala SHIB
+        # cogunlukta). Veri penceresi olayin sonuna cok yakinsa (24h verisi
+        # yoksa) belirsiz sayilir, kacirildi/kacirilmadi DENMEZ.
+        fully_missed = None
+        if shib_pct_24h is not None:
+            fully_missed = (shib_pct_24h < 50) if yon == "YUKARI" else (shib_pct_24h > 50)
+
         satir = {
             "event_id": i, "direction": yon,
             "event_start": _fmt(event_start_ms), "move_pct": round(degisim, 2),
@@ -250,15 +274,19 @@ def main():
             "hysteresis_extra_delay_h": round(hysteresis_extra_h, 2) if hysteresis_extra_h is not None else None,
             "hysteresis_reset_count": reset_count,
             "allocation_delay_h": round(allocation_h, 2) if allocation_h is not None else None,
-            "first_valid_signal_time": _fmt(t_valid_ms),
-            "strong_trend_time": _fmt(t_guclu_ms),
+            "first_score_pass": _fmt(t_score_ms),
+            "first_raw_uptrend": _fmt(t_valid_ms),
+            "first_confirmed_uptrend": _fmt(t_confirm_ms),
+            "first_strong_uptrend": _fmt(t_guclu_ms),
             "shib_pct_start": pct_at(0), "shib_pct_3h": pct_at(3), "shib_pct_6h": pct_at(6),
-            "shib_pct_12h": pct_at(12), "shib_pct_24h": pct_at(24),
+            "shib_pct_12h": pct_at(12), "shib_pct_24h": shib_pct_24h,
+            "fully_missed": fully_missed,
         }
         satirlar.append(satir)
         skor_notu = "HIC ESIGI GECMEDI" if score_h is None else f"skor esigi +{score_h}h"
+        kacirildi_notu = " [TAMAMEN KACIRILDI]" if fully_missed else ""
         print(f"[{i}] {yon} {degisim:+.1f}% @ {satir['event_start']} -> {skor_notu}, "
-              f"hysteresis_extra={satir['hysteresis_extra_delay_h']}h (reset={reset_count})")
+              f"hysteresis_extra={satir['hysteresis_extra_delay_h']}h (reset={reset_count}){kacirildi_notu}")
 
         # --- per-tick ham gunluk (kullanicinin istedigi tam denetim izi) ---
         hedef_oy = 1 if yon == "YUKARI" else -1
@@ -267,21 +295,21 @@ def main():
                 break
             idx1h = ts_1h.index_at(t["ts_ms"])
             tick_satirlari.append({
-                "event_id": i, "direction": yon, "timestamp": _fmt(t["ts_ms"]),
-                "hybrid_score_raw": round(t["raw_score"], 2), "regime_raw": t["raw_regime"],
-                "confirmed_regime": t["confirmed_regime"],
+                "timestamp": _fmt(t["ts_ms"]), "event_id": i, "direction": yon,
                 "ema_ok": ts_1h.ema_vote(idx1h) == hedef_oy,
                 "kama_ok": ts_1h.kama_vote(idx1h) == hedef_oy,
                 "supertrend_ok": ts_1h.supertrend_vote(idx1h) == hedef_oy,
                 "nw_ok": _nw_slope_vote(ts_1h, idx1h) == hedef_oy if idx1h is not None else False,
                 "wavetrend_ok": _wt_slope_vote(ts_1h, idx1h) == hedef_oy if idx1h is not None else False,
-                "major_confirmation_ok": (he._majors_direction(majors_series, t["ts_ms"]) > 0.2) if yon == "YUKARI"
-                                         else (he._majors_direction(majors_series, t["ts_ms"]) < -0.2),
+                "majors_ok": (he._majors_direction(majors_series, t["ts_ms"]) > 0.2) if yon == "YUKARI"
+                             else (he._majors_direction(majors_series, t["ts_ms"]) < -0.2),
+                "raw_hybrid_score": round(t["raw_score"], 2),
                 "score_threshold_ok": t["raw_regime"] in hedef_regimeler,
+                "raw_regime": t["raw_regime"],
                 "hysteresis_counter": t["candidate_count"],
-                "hysteresis_ok": t["confirmed_regime"] in hedef_regimeler,
-                "target_shib_allocation": round(t["trend_target"], 2),
-                "actual_shib_allocation": round(shib_pct_gecmisi[t["idx"]], 2),
+                "confirmed_regime": t["confirmed_regime"],
+                "target_shib_pct": round(t["trend_target"], 2),
+                "actual_shib_pct": round(shib_pct_gecmisi[t["idx"]], 2),
             })
 
     if satirlar:
@@ -317,20 +345,28 @@ def main():
         ("SCORE_THRESHOLD", "score_threshold_delay_h"), ("HYSTERESIS_EXTRA", "hysteresis_extra_delay_h"),
         ("ALLOCATION_STEP", "allocation_delay_h"),
     ]
+    # "EVENTS LATE" = deger MEVCUT (o faktor olay penceresinde nihayet
+    # gerceklesti) VE >0 (yani T0'da zaten hazir degildi, gercekten
+    # BEKLEME oldu). deger==0 "gec kalma" degil "olay basinda zaten hazirdi"
+    # demektir - bu ayrim SCORE_BELOW_THRESHOLD'daki 0.0 hatasinin ayni
+    # turden bir tekrari olmasin diye bilerek yapiliyor.
     faktor_degerleri = {}
+    faktor_gec_kalanlar = {}
     for isim, kolon in kolon_map:
-        degerler = [s[kolon] for s in yukselis if s[kolon] is not None]
-        faktor_degerleri[isim] = degerler
+        tum_degerler = [s[kolon] for s in yukselis if s[kolon] is not None]
+        faktor_degerleri[isim] = tum_degerler
+        faktor_gec_kalanlar[isim] = [v for v in tum_degerler if v > 0]
 
-    print(f"\n{'=' * 78}\nFAKTOR TABLOSU - SADECE BUYUK YUKSELISLER (n={len(yukselis)} olay)\n{'=' * 78}")
-    print(f"{'FAKTOR':<20} {'MEDIAN(sa)':>11} {'ORTALAMA(sa)':>13} {'OLAY SAYISI':>12}")
-    print("-" * 78)
+    print(f"\n{'=' * 90}\nFAKTOR TABLOSU - SADECE BUYUK YUKSELISLER (n={len(yukselis)} olay)\n{'=' * 90}")
+    print(f"{'FAKTOR':<20} {'MEDIAN(sa)':>11} {'ORTALAMA(sa)':>13} {'P90(sa)':>9} {'EVENTS LATE':>12}")
+    print("-" * 90)
     for isim, _kolon in kolon_map:
-        degerler = faktor_degerleri[isim]
-        if degerler:
-            print(f"{isim:<20} {statistics.median(degerler):>11.1f} {statistics.mean(degerler):>13.1f} {len(degerler):>12}")
+        gec = faktor_gec_kalanlar[isim]
+        if gec:
+            print(f"{isim:<20} {statistics.median(gec):>11.1f} {statistics.mean(gec):>13.1f} "
+                  f"{_percentile(gec, 90):>9.1f} {len(gec):>12}")
         else:
-            print(f"{isim:<20} {'n/a':>11} {'n/a':>13} {0:>12}")
+            print(f"{isim:<20} {'n/a':>11} {'n/a':>13} {'n/a':>9} {0:>12}")
 
     # ============== SANITY CHECK 1: HYSTERESIS_EXTRA makul mu? ==============
     print(f"\n{'=' * 78}\nSANITY CHECK 1: HYSTERESIS_EXTRA_DELAY makul mu?\n{'=' * 78}")
@@ -357,14 +393,33 @@ def main():
         print("  o bolgede GURULTULU/KARARSIZ olmasi sorunudur.")
     print("(Not: bu sadece olcum/aciklama - HENUZ hicbir parametre degistirilmedi.)")
 
+    # ============== "TAMAMEN KACIRILAN" yukselislerde HANGI faktor baskin? ==============
+    # Bu sayim SADECE "fully_missed=True" olan (24sa sonra bile hedef tarafa
+    # gecilmemis) yukselislerin ALT KUMESINDE yapilir - TUM olaylara
+    # uygulanan tek-reason secimi DEGILDIR (onceki surumun hatasi buydu).
+    # Amac: "bu 3 faktor sadece GECIKTIRMIYOR, bazi trendleri TAMAMEN
+    # KACIRTIYOR mu" sorusuna ayri bir sayimla cevap vermek.
+    kacirilan_yukselisler = [s for s in yukselis if s["fully_missed"]]
+    missed_dominant_count = {isim: 0 for isim, _ in kolon_map}
+    for s in kacirilan_yukselisler:
+        adaylar = {isim: s[kolon] for isim, kolon in kolon_map if s[kolon] is not None}
+        if adaylar:
+            baskin = max(adaylar, key=adaylar.get)
+            missed_dominant_count[baskin] += 1
+
     # ============== CEVAP ==============
-    print(f"\n{'=' * 78}\nSORU: Guclu yukselisi erken yakalamayi GERCEKTEN geciktiren ilk 3 mekanizma?\n(MEDIAN'a gore siralanmis - ortalama outlier'lardan etkilenebilir)\n{'=' * 78}")
+    print(f"\n{'=' * 90}\nSORU: Guclu yukselisi GERCEKTEN geciktiren ilk 3 mekanizma?\n"
+          f"(MEDIAN'a gore siralanmis, sadece >0 saat 'gec kalma' olaylari uzerinden - ortalama outlier'lardan etkilenebilir)\n{'=' * 90}")
     siralama = sorted(
-        ((isim, faktor_degerleri[isim]) for isim, _ in kolon_map if faktor_degerleri[isim]),
+        ((isim, faktor_gec_kalanlar[isim]) for isim, _ in kolon_map if faktor_gec_kalanlar[isim]),
         key=lambda kv: -statistics.median(kv[1]),
     )
+    print(f"({len(kacirilan_yukselisler)} / {len(yukselis)} buyuk yukselis 24 saat sonra bile TAMAMEN KACIRILMIS - "
+          f"SHIB payi hala %50'nin altinda.)\n")
     for isim, degerler in siralama[:3]:
-        print(f"  - {isim}: median {statistics.median(degerler):.1f} saat (ortalama {statistics.mean(degerler):.1f} saat, n={len(degerler)})")
+        print(f"  - {isim}: median {statistics.median(degerler):.1f} saat, ortalama {statistics.mean(degerler):.1f} saat, "
+              f"P90 {_percentile(degerler, 90):.1f} saat (n={len(degerler)} olayda gec kaldi; "
+              f"{missed_dominant_count[isim]} tamamen-kacirilan olayda BASKIN neden).")
     if not siralama:
         print("  (Yeterli olay/veri yok - pencereyi buyutmeyi deneyin.)")
     print("\n(Not: bu SADECE teshis - hicbir parametre/strateji degistirilmedi.)")
