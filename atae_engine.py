@@ -264,7 +264,7 @@ def yeni_evidence_state():
         "bull_evidence": 0.0, "bear_evidence": 0.0,
         "state": "NEUTRAL", "state_entry_time": None, "state_entry_price": None,
         "prev_state": None,
-        "persist_up": 0, "persist_down": 0,
+        "persist_up": 0, "persist_down": 0, "override_persist_bull": 0, "override_persist_bear": 0,
         "max_bull_evidence": 0.0, "max_bear_evidence": 0.0,
         "last_supporting_signal_time": None, "last_opposing_signal_time": None,
     }
@@ -345,10 +345,28 @@ def step(evidence_state, shib_series, majors_series, timestamp_ms,
     state = evidence_state["state"]
 
     # --- GUCLU TERS KANIT: dogal komsuluk sirasini atlayip DOGRUDAN
-    # STRONG_BULL/STRONG_BEAR'a gecis (madde 2 sonu, kullanicinin acik istegi) ---
-    if bull_ev >= OVERRIDE_ESIK and state != "STRONG_BULL":
+    # STRONG_BULL/STRONG_BEAR'a gecis (madde 2 sonu, kullanicinin acik istegi).
+    # KOK NEDEN DUZELTMESI (adversarial stress-test ile bulundu): OVERRIDE_ESIK
+    # tek bir tik'te asilir asilmaz ANINDA tetikleniyordu - PUSH_MAX=40 /
+    # DECAY_PER_TICK=0.90 ile bu esik SADECE 3 ardisik saatlik tik'te
+    # (40->76->100) asiliyor, yani "nadir, ezici, surdurulebilir kanit" DEGIL,
+    # rutin 3 saatlik hareketlerde bile tetiklenen bir mekanizmaya donusuyordu.
+    # Duzeltme: override artik PERSISTENCE_GUCLU (=4, zaten var olan, normal
+    # GUCLU gecisler icin kullanilan ayni sabit - yeni sayi UYDURULMADI) kadar
+    # ARDISIK tik boyunca esigin USTUNDE KALMASINI sart kosuyor - yeni bir
+    # threshold DEGIL, mevcut esigin ANLIK yerine SURDURULEBILIR olcumu.
+    if bull_ev >= OVERRIDE_ESIK:
+        evidence_state["override_persist_bull"] += 1
+    else:
+        evidence_state["override_persist_bull"] = 0
+    if bear_ev >= OVERRIDE_ESIK:
+        evidence_state["override_persist_bear"] += 1
+    else:
+        evidence_state["override_persist_bear"] = 0
+
+    if evidence_state["override_persist_bull"] >= PERSISTENCE_GUCLU and state != "STRONG_BULL":
         yeni_state, neden = "STRONG_BULL", "OVERRIDE_BULL"
-    elif bear_ev >= OVERRIDE_ESIK and state != "STRONG_BEAR":
+    elif evidence_state["override_persist_bear"] >= PERSISTENCE_GUCLU and state != "STRONG_BEAR":
         yeni_state, neden = "STRONG_BEAR", "OVERRIDE_BEAR"
     else:
         hedef_up = up_map.get(state)
@@ -378,6 +396,8 @@ def step(evidence_state, shib_series, majors_series, timestamp_ms,
         evidence_state["state_entry_time"] = timestamp_ms
         evidence_state["persist_up"] = 0
         evidence_state["persist_down"] = 0
+        evidence_state["override_persist_bull"] = 0
+        evidence_state["override_persist_bear"] = 0
 
     slow_up = slow_agreement(shib_series, timestamp_ms, 1)
     slow_down = slow_agreement(shib_series, timestamp_ms, -1)
