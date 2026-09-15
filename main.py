@@ -1,96 +1,213 @@
+import re
+from typing import Tuple
+
+import altair as alt
+import pandas as pd
 import streamlit as st
-import urllib.request
-import json
-import time
-import ssl
+import yfinance as yf
 
 st.set_page_config(page_title="Borsa Tarayıcı", page_icon="📊", layout="centered")
 
-st.title("📊 Yapay Zeka Destekli Borsa Tarayıcı")
-st.caption("BIST hisseleri için sonuna .IS ekleyin (Örn: THYAO.IS). Kriptolar için: BTC-USD, SHIB-USD")
+RSI_PERIYODU = 14
+RSI_ASIRI_ALIM = 70
+RSI_ASIRI_SATIM = 30
+TICKER_DESENI = re.compile(r"^[A-Z0-9.\-=]{1,15}$")
+HIZLI_SECIMLER = ["SHIB-USD", "BTC-USD", "ETH-USD", "THYAO.IS"]
 
-def format_fiyat(fiyat):
-    if fiyat is None: return "0.00"
-    if fiyat < 0.01: return f"{fiyat:.8f}"
-    elif fiyat < 1: return f"{fiyat:.4f}"
+st.title("📊 Yapay Zeka Destekli Borsa Tarayıcı")
+st.caption(
+    "BIST hisseleri için sonuna .IS ekleyin (Örn: THYAO.IS). "
+    "Kriptolar için: BTC-USD, SHIB-USD"
+)
+
+
+def format_fiyat(fiyat: float) -> str:
+    if fiyat is None or pd.isna(fiyat):
+        return "0.00"
+    if fiyat < 0.01:
+        return f"{fiyat:.8f}"
+    if fiyat < 1:
+        return f"{fiyat:.4f}"
     return f"{fiyat:.2f}"
 
-def rsi_hesapla(fiyat_listesi):
-    if len(fiyat_listesi) < 15: return 50
-    kayiplar, kazanclar = [], []
-    for i in range(1, len(fiyat_listesi)):
-        fark = fiyat_listesi[i] - fiyat_listesi[i-1]
-        if fark > 0:
-            kazanclar.append(fark)
-            kayiplar.append(0)
-        else:
-            kazanclar.append(0)
-            kayiplar.append(abs(fark))
-    son_14_kazanc = sum(kazanclar[-14:]) / 14
-    son_14_kayip = sum(kayiplar[-14:]) / 14
-    if son_14_kayip == 0: return 100
-    return 100 - (100 / (1 + (son_14_kazanc / son_14_kayip)))
 
-ticker = st.text_input("Varlık Kodu Girin:", value="THYAO.IS").strip().upper()
+def rsi_hesapla(kapanislar: pd.Series, periyot: int = RSI_PERIYODU) -> pd.Series:
+    """Wilder'in üstel düzeltmeli RSI yöntemiyle hesaplama (standart tanıma uygun)."""
+    fark = kapanislar.diff()
+    kazanc = fark.clip(lower=0)
+    kayip = -fark.clip(upper=0)
+    ort_kazanc = kazanc.ewm(alpha=1 / periyot, min_periods=periyot, adjust=False).mean()
+    ort_kayip = kayip.ewm(alpha=1 / periyot, min_periods=periyot, adjust=False).mean()
+    rs = ort_kazanc / ort_kayip.replace(0, pd.NA)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.fillna(50)
+
+
+def sinyal_uret(rsi_degeri: float) -> Tuple[str, str]:
+    """Tüm arayüzde tek ve tutarlı eşik mantığını kullanan sinyal üretici."""
+    if rsi_degeri is None or pd.isna(rsi_degeri):
+        return "⚪ [BEKLE]", "info"
+    if rsi_degeri > RSI_ASIRI_ALIM:
+        return "🔴 [SAT]", "warning"
+    if rsi_degeri < RSI_ASIRI_SATIM:
+        return "🟢 [AL]", "success"
+    return "⚪ [BEKLE]", "info"
+
+
+@st.cache_data(ttl=300, show_spinner="Veri çekiliyor...")
+def veri_getir(ticker: str, periyot: str) -> pd.DataFrame:
+    veri = yf.Ticker(ticker).history(period=periyot, interval="1d", auto_adjust=True)
+    if veri.empty:
+        raise ValueError("Bu kod için veri bulunamadı. Kodun doğruluğunu kontrol edin.")
+    return veri
+
+
+def basit_rsi_backtest(veri: pd.DataFrame) -> dict:
+    """RSI eşik geçişlerine dayalı basit AL/SAT stratejisinin geçmiş test simülasyonu."""
+    islem_getirileri = []
+    pozisyonda = False
+    giris_fiyati = 0.0
+
+    for fiyat, rsi_degeri in zip(veri["Close"], veri["RSI"]):
+        if pd.isna(rsi_degeri):
+            continue
+        if not pozisyonda and rsi_degeri < RSI_ASIRI_SATIM:
+            pozisyonda = True
+            giris_fiyati = fiyat
+        elif pozisyonda and rsi_degeri > RSI_ASIRI_ALIM:
+            islem_getirileri.append((fiyat - giris_fiyati) / giris_fiyati * 100)
+            pozisyonda = False
+
+    acik_pozisyon_getirisi = None
+    if pozisyonda:
+        acik_pozisyon_getirisi = (veri["Close"].iloc[-1] - giris_fiyati) / giris_fiyati * 100
+
+    al_tut_getirisi = (veri["Close"].iloc[-1] - veri["Close"].iloc[0]) / veri["Close"].iloc[0] * 100
+    kazanan_islem = sum(1 for getiri in islem_getirileri if getiri > 0)
+
+    return {
+        "islem_sayisi": len(islem_getirileri),
+        "kazanan_islem": kazanan_islem,
+        "toplam_strateji_getirisi": sum(islem_getirileri),
+        "acik_pozisyon_getirisi": acik_pozisyon_getirisi,
+        "al_tut_getirisi": al_tut_getirisi,
+    }
+
+
+if "ticker_input" not in st.session_state:
+    st.session_state["ticker_input"] = "SHIB-USD"
+
+st.write("**Hızlı Seçim:**")
+hizli_secim_kolonlari = st.columns(len(HIZLI_SECIMLER))
+for kolon, sembol in zip(hizli_secim_kolonlari, HIZLI_SECIMLER):
+    if kolon.button(sembol):
+        st.session_state["ticker_input"] = sembol
+
+ticker = st.text_input("Varlık Kodu Girin:", key="ticker_input").strip().upper()
+periyot = st.selectbox("Zaman Aralığı", ["1mo", "3mo", "6mo", "1y"], index=1)
 
 if st.button("ANALİZ ET", type="primary"):
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=2mo&interval=1d"
-    
-    try:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        
-        with urllib.request.urlopen(req, context=ctx) as response:
-            data = json.loads(response.read().decode())
-            
-        chart_data = data['chart']['result'][0]
-        kapanislar = chart_data['indicators']['quote'][0]['close']
-        zamanlar = chart_data['timestamp']
-        fiyatlar = [x for x in kapanislar if x is not None]
-        
-        if len(fiyatlar) < 20:
-            st.error("Yetersiz veri geçmişi!")
+    if not TICKER_DESENI.match(ticker):
+        st.error("Geçersiz varlık kodu. Sadece harf, rakam, nokta ve tire kullanın (Örn: SHIB-USD).")
+    else:
+        try:
+            veri = veri_getir(ticker, periyot)
+        except ValueError as e:
+            st.error(str(e))
+        except Exception as e:
+            st.error(
+                f"Veri alınırken bir sorun oluştu, lütfen daha sonra tekrar deneyin. "
+                f"(Detay: {type(e).__name__})"
+            )
         else:
-            son_fiyat = fiyatlar[-1]
-            guncel_rsi = rsi_hesapla(fiyatlar)
-            
-            col1, col2 = st.columns(2)
-            col1.metric("Son Fiyat", format_fiyat(son_fiyat))
-            col2.metric("Güncel RSI", f"{guncel_rsi:.2f}")
-            
-            if guncel_rsi > 70:
-                st.warning("⚠️ AŞIRI ALIM BÖLGESİ! Fiyat teknik tepeye yakın. Yeni alım riskli olabilir, SATIŞ kollanabilir.")
-            elif guncel_rsi < 30:
-                st.success("✅ AŞIRI SATIM BÖLGESİ! Fiyat oldukça ucuzlamış. Kademeli ALIM düşünülebilir.")
+            if len(veri) < RSI_PERIYODU + 5:
+                st.error("Yetersiz veri geçmişi! Daha uzun bir zaman aralığı seçin.")
             else:
-                st.info("🔄 NÖTR BÖLGE: Fiyat dengeli bantta gidiyor. Mevcut pozisyonu koruyup bekleyin.")
-                
-            st.subheader("📅 Son 10 Günlük Trend ve Sinyaller")
-            
-            tablo_verisi = []
-            for i in range(-10, 0):
-                f = fiyatlar[i]
-                o_gunkuy_gecmis = fiyatlar[:len(fiyatlar)+i+1] if i != -1 else fiyatlar
-                o_gunku_rsi = rsi_hesapla(o_gunkuy_gecmis)
-                
-                if o_gunku_rsi > 68: sinyal = "🔴 [SAT]"
-                elif o_gunku_rsi < 32: sinyal = "🟢 [AL]"
-                else: sinyal = "⚪ [BEKLE]"
-                
-                tarih_str = time.strftime('%d/%m/%Y', time.localtime(zamanlar[len(fiyatlar)+i]))
-                tablo_verisi.append({"Tarih": tarih_str, "Fiyat": format_fiyat(f), "Sinyal": sinyal})
-                
-            st.table(tablo_verisi)
-            
-    except Exception as e:
-        st.error(f"Hata oluştu! Kodun doğruluğunu kontrol edin. (Hata: {e})")
-        
-      # KODUN EN ALTINA EKLENECEK YASAL UYARI METNİ
-st.markdown("---")
-st.caption("""
-⚠️ **YASAL UYARI:** Bu uygulamada yer alan tüm bilgiler, grafikler ve al-sat sinyalleri tamamen teknik göstergeler (RSI) baz alınarak otomatik hesaplanmaktadır ve **kesinlikle yatırım danışmanlığı kapsamında değildir.** Burada yer alan yorumlar doğrultusunda yapılacak işlemler sonucunda oluşabilecek zararlardan bu yazılım ve geliştiricisi sorumlu tutulamaz. Güzel kızıma ithafen yapılmıştir. GRA
+                veri = veri.copy()
+                veri["RSI"] = rsi_hesapla(veri["Close"])
+                veri["SMA20"] = veri["Close"].rolling(20, min_periods=1).mean()
+                veri["SMA50"] = veri["Close"].rolling(50, min_periods=1).mean()
 
-""")
-    
+                son_fiyat = veri["Close"].iloc[-1]
+                guncel_rsi = veri["RSI"].iloc[-1]
+                trend = "YÜKSELİŞ 📈" if veri["SMA20"].iloc[-1] > veri["SMA50"].iloc[-1] else "DÜŞÜŞ 📉"
+
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Son Fiyat", format_fiyat(son_fiyat))
+                col2.metric("Güncel RSI", f"{guncel_rsi:.2f}")
+                col3.metric("Trend (SMA20/50)", trend)
+
+                _, seviye = sinyal_uret(guncel_rsi)
+                mesajlar = {
+                    "warning": "⚠️ AŞIRI ALIM BÖLGESİ! Fiyat teknik tepeye yakın, yeni alım riskli olabilir.",
+                    "success": "✅ AŞIRI SATIM BÖLGESİ! Fiyat oldukça ucuzlamış, kademeli alım düşünülebilir.",
+                    "info": "🔄 NÖTR BÖLGE: Fiyat dengeli bantta gidiyor.",
+                }
+                getattr(st, seviye)(mesajlar[seviye])
+
+                st.subheader("📈 Fiyat ve Hareketli Ortalamalar")
+                st.line_chart(veri[["Close", "SMA20", "SMA50"]])
+
+                st.subheader("📊 RSI Göstergesi")
+                idx_adi = veri.index.name or "Date"
+                rsi_df = veri.reset_index()[[idx_adi, "RSI"]]
+                rsi_df.columns = ["Tarih", "RSI"]
+                rsi_cizgi = alt.Chart(rsi_df).mark_line(color="#1f77b4").encode(
+                    x="Tarih:T", y=alt.Y("RSI:Q", scale=alt.Scale(domain=[0, 100]))
+                )
+                asiri_alim_cizgi = alt.Chart(pd.DataFrame({"y": [RSI_ASIRI_ALIM]})).mark_rule(
+                    color="red", strokeDash=[4, 4]
+                ).encode(y="y")
+                asiri_satim_cizgi = alt.Chart(pd.DataFrame({"y": [RSI_ASIRI_SATIM]})).mark_rule(
+                    color="green", strokeDash=[4, 4]
+                ).encode(y="y")
+                st.altair_chart(rsi_cizgi + asiri_alim_cizgi + asiri_satim_cizgi, use_container_width=True)
+
+                st.subheader("📅 Son 10 Günlük Trend ve Sinyaller")
+                tablo_verisi = []
+                for tarih, satir in veri.tail(10).iterrows():
+                    etiket, _ = sinyal_uret(satir["RSI"])
+                    tablo_verisi.append(
+                        {
+                            "Tarih": tarih.strftime("%d/%m/%Y"),
+                            "Fiyat": format_fiyat(satir["Close"]),
+                            "RSI": f"{satir['RSI']:.1f}",
+                            "Sinyal": etiket,
+                        }
+                    )
+                st.table(tablo_verisi)
+
+                st.subheader("🧪 Strateji Geçmiş Testi (Backtest)")
+                sonuc = basit_rsi_backtest(veri)
+                bcol1, bcol2, bcol3 = st.columns(3)
+                bcol1.metric("Toplam İşlem", sonuc["islem_sayisi"])
+                kazanma_orani = (
+                    f"%{(sonuc['kazanan_islem'] / sonuc['islem_sayisi'] * 100):.0f}"
+                    if sonuc["islem_sayisi"]
+                    else "—"
+                )
+                bcol2.metric("Kazanma Oranı", kazanma_orani)
+                bcol3.metric("Strateji Toplam Getiri", f"%{sonuc['toplam_strateji_getirisi']:.1f}")
+                st.caption(f"Aynı dönemde Al-ve-Tut getirisi: %{sonuc['al_tut_getirisi']:.1f}")
+                if sonuc["acik_pozisyon_getirisi"] is not None:
+                    st.caption(
+                        f"Şu anda simülasyonda açık pozisyon var, güncel getirisi: "
+                        f"%{sonuc['acik_pozisyon_getirisi']:.1f}"
+                    )
+                st.caption(
+                    "Bu sonuçlar tamamen geçmiş veriye dayalı bir simülasyondur; "
+                    "işlem maliyetlerini/kaymayı içermez ve gelecekteki performansı garanti etmez."
+                )
+
+st.markdown("---")
+st.caption(
+    """
+⚠️ **YASAL UYARI:** Bu uygulamada yer alan tüm bilgiler, grafikler, al-sat sinyalleri ve
+geçmiş test (backtest) sonuçları tamamen teknik göstergeler (RSI, hareketli ortalama) baz
+alınarak otomatik hesaplanmaktadır ve **kesinlikle yatırım danışmanlığı kapsamında değildir.**
+Geçmiş performans gelecekteki kazancı garanti etmez; özellikle SHIB gibi yüksek oynaklığa sahip
+kripto varlıklarda sermayenizin tamamını kaybedebilirsiniz. Burada yer alan yorumlar
+doğrultusunda yapılacak işlemler sonucunda oluşabilecek zararlardan bu yazılım ve geliştiricisi
+sorumlu tutulamaz. Güzel kızıma ithafen yapılmıştır. GRA
+"""
+)
