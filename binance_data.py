@@ -5,6 +5,7 @@ panelinde (main.py) hem de otomatik işlem botunda (trading_bot.py)
 ortak kullanılır.
 """
 import json
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Tuple
@@ -16,9 +17,19 @@ RSI_PERIYODU = 14
 RSI_ASIRI_ALIM = 70
 RSI_ASIRI_SATIM = 30
 
+# Piyasa değeri büyük, likiditesi yüksek, köklü coinler - meme/mikro-cap
+# coinlere göre ani ve aşırı oynaklık riski daha düşük.
 POPULER_COINLER = [
-    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT",
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+    "ADAUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT", "LTCUSDT",
 ]
+
+
+def _hata_mesaji_ayikla(govde: bytes) -> str:
+    try:
+        return json.loads(govde.decode()).get("msg", "geçersiz istek")
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return "geçersiz istek"
 
 
 def binance_klines_getir(sembol: str, gun_sayisi: int, interval: str = "1d") -> pd.DataFrame:
@@ -30,8 +41,15 @@ def binance_klines_getir(sembol: str, gun_sayisi: int, interval: str = "1d") -> 
         f"{BINANCE_BASE_URL}/api/v3/klines?{parametreler}",
         headers={"User-Agent": "Mozilla/5.0"},
     )
-    with urllib.request.urlopen(istek, timeout=10) as yanit:
-        veri_json = json.loads(yanit.read().decode())
+    try:
+        with urllib.request.urlopen(istek, timeout=10) as yanit:
+            veri_json = json.loads(yanit.read().decode())
+    except urllib.error.HTTPError as e:
+        # Binance geçersiz sembol/parametre hatalarını 4xx durum koduyla
+        # döndürür; urllib bunu istisna olarak fırlatır (normal yanıt değil).
+        raise ValueError(f"Binance hatası: {_hata_mesaji_ayikla(e.read())}") from e
+    except urllib.error.URLError as e:
+        raise ValueError(f"Binance'a bağlanılamadı: {e.reason}") from e
 
     if isinstance(veri_json, dict):
         raise ValueError(f"Binance hatası: {veri_json.get('msg', 'geçersiz sembol')}")
@@ -60,6 +78,10 @@ def rsi_hesapla(kapanislar: pd.Series, periyot: int = RSI_PERIYODU) -> pd.Series
     ort_kayip = kayip.ewm(alpha=1 / periyot, min_periods=periyot, adjust=False).mean()
     rs = ort_kazanc / ort_kayip.replace(0, pd.NA)
     rsi = 100 - (100 / (1 + rs))
+    # Kayıp sıfırsa (ör. kesintisiz yükseliş) bölme NaN üretir; doğru RSI
+    # değeri o durumda 100'dür (hiç düşüş yok), tamamen düz seyirde ise 50.
+    rsi = rsi.mask((ort_kayip == 0) & (ort_kazanc > 0), 100.0)
+    rsi = rsi.mask((ort_kayip == 0) & (ort_kazanc == 0), 50.0)
     return rsi.fillna(50)
 
 

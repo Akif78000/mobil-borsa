@@ -60,7 +60,13 @@ from decimal import ROUND_DOWN, Decimal
 from pathlib import Path
 from typing import Optional
 
-from binance_data import POPULER_COINLER, gosterge_ekle, binance_klines_getir
+from binance_data import (
+    POPULER_COINLER,
+    RSI_ASIRI_ALIM,
+    RSI_ASIRI_SATIM,
+    binance_klines_getir,
+    gosterge_ekle,
+)
 
 DURUM_DOSYASI = Path("trading_bot_state.json")
 MAINNET_URL = "https://api.binance.com"
@@ -173,6 +179,8 @@ class BinanceIstemci:
         except urllib.error.HTTPError as e:
             hata_govde = e.read().decode()
             raise RuntimeError(f"Binance API hatası ({e.code}): {hata_govde}") from e
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"Binance'a bağlanılamadı: {e.reason}") from e
 
     def sembol_bilgisi(self, sembol: str) -> dict:
         if sembol in self._sembol_bilgi_onbellek:
@@ -182,9 +190,18 @@ class BinanceIstemci:
             f"{self.ayarlar.base_url}/api/v3/exchangeInfo?{parametreler}",
             headers={"User-Agent": "Mozilla/5.0"},
         )
-        with urllib.request.urlopen(istek, timeout=10) as yanit:
-            veri = json.loads(yanit.read().decode())
-        bilgi = veri["symbols"][0]
+        try:
+            with urllib.request.urlopen(istek, timeout=10) as yanit:
+                veri = json.loads(yanit.read().decode())
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(f"Binance API hatası ({e.code}): {e.read().decode()}") from e
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"Binance'a bağlanılamadı: {e.reason}") from e
+
+        semboller = veri.get("symbols") or []
+        if not semboller:
+            raise ValueError(f"{sembol} için borsa bilgisi bulunamadı.")
+        bilgi = semboller[0]
         self._sembol_bilgi_onbellek[sembol] = bilgi
         return bilgi
 
@@ -313,7 +330,7 @@ class TradingBot:
                 sembol, sebep, getiri_yuzde, self.durum["bakiye_usdt"],
             )
         else:
-            varlik = sembol.replace("USDT", "")
+            varlik = sembol[:-4] if sembol.endswith("USDT") else sembol
             adim = self.istemci.adim_buyuklugu(sembol)
             elde_mevcut = self.istemci.serbest_bakiye(varlik)
             satilacak_miktar = _miktar_asagi_yuvarla(min(pozisyon["miktar"], elde_mevcut), adim)
@@ -354,7 +371,7 @@ class TradingBot:
                 self._pozisyon_kapat(sembol, guncel_fiyat, "stop-loss")
             elif degisim_yuzde >= self.ayarlar.take_profit_yuzde:
                 self._pozisyon_kapat(sembol, guncel_fiyat, "take-profit")
-            elif guncel_rsi > 70:
+            elif guncel_rsi > RSI_ASIRI_ALIM:
                 self._pozisyon_kapat(sembol, guncel_fiyat, "RSI aşırı alım")
             return
 
@@ -362,7 +379,7 @@ class TradingBot:
             return
         if len(self.durum["pozisyonlar"]) >= self.ayarlar.max_positions:
             return
-        if guncel_rsi < 30 and yukselis_trendi:
+        if guncel_rsi < RSI_ASIRI_SATIM and yukselis_trendi:
             self._pozisyon_ac(sembol, guncel_fiyat)
 
     def tek_tur_calistir(self) -> None:
@@ -373,7 +390,10 @@ class TradingBot:
                 self.ayarlar.max_gunluk_zarar_yuzde,
             )
         for sembol in self.ayarlar.watchlist:
-            self._sembol_degerlendir(sembol)
+            try:
+                self._sembol_degerlendir(sembol)
+            except Exception:
+                log.exception("%s işlenirken beklenmeyen hata oluştu, bu tur için atlanıyor.", sembol)
         self._durum_kaydet()
 
     def calistir(self, tek_seferlik: bool = False) -> None:
