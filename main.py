@@ -7,23 +7,19 @@ from typing import Tuple
 import altair as alt
 import pandas as pd
 import streamlit as st
-import yfinance as yf
 
-st.set_page_config(page_title="Borsa Tarayıcı", page_icon="📊", layout="centered")
+st.set_page_config(page_title="Kripto Tarayıcı", page_icon="📊", layout="centered")
 
 RSI_PERIYODU = 14
 RSI_ASIRI_ALIM = 70
 RSI_ASIRI_SATIM = 30
-TICKER_DESENI = re.compile(r"^[A-Z0-9.]{1,15}$")
-HIZLI_SECIMLER = ["SHIBUSDT", "BTCUSDT", "ETHUSDT", "THYAO.IS"]
+TICKER_DESENI = re.compile(r"^[A-Z0-9]{1,15}$")
+HIZLI_SECIMLER = ["SHIBUSDT", "BTCUSDT", "ETHUSDT", "DOGEUSDT"]
 BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
 BINANCE_GUN_LIMITI = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365}
 
-st.title("📊 Yapay Zeka Destekli Borsa Tarayıcı")
-st.caption(
-    "Kripto için Binance sembolü girin (Örn: SHIBUSDT, BTCUSDT). "
-    "BIST hisseleri için sonuna .IS ekleyin (Örn: THYAO.IS)."
-)
+st.title("📊 Yapay Zeka Destekli Kripto Tarayıcı")
+st.caption("Binance sembolü girin (Örn: SHIBUSDT, BTCUSDT, ETHUSDT).")
 
 
 def format_fiyat(fiyat: float) -> str:
@@ -90,14 +86,10 @@ def _binance_klines_getir(sembol: str, gun_sayisi: int) -> pd.DataFrame:
 
 @st.cache_data(ttl=300, show_spinner="Veri çekiliyor...")
 def veri_getir(ticker: str, periyot: str) -> pd.DataFrame:
-    if ticker.endswith(".IS"):
-        veri = yf.Ticker(ticker).history(period=periyot, interval="1d", auto_adjust=True)
-    else:
-        gun_sayisi = BINANCE_GUN_LIMITI[periyot]
-        veri = _binance_klines_getir(ticker, gun_sayisi)
-
+    gun_sayisi = BINANCE_GUN_LIMITI[periyot]
+    veri = _binance_klines_getir(ticker, gun_sayisi)
     if veri.empty:
-        raise ValueError("Bu kod için veri bulunamadı. Kodun doğruluğunu kontrol edin.")
+        raise ValueError("Bu sembol için veri bulunamadı. Kodun doğruluğunu kontrol edin.")
     return veri
 
 
@@ -147,7 +139,7 @@ periyot = st.selectbox("Zaman Aralığı", ["1mo", "3mo", "6mo", "1y"], index=1)
 
 if st.button("ANALİZ ET", type="primary"):
     if not TICKER_DESENI.match(ticker):
-        st.error("Geçersiz varlık kodu. Sadece harf, rakam ve nokta kullanın (Örn: SHIBUSDT).")
+        st.error("Geçersiz varlık kodu. Sadece harf ve rakam kullanın (Örn: SHIBUSDT).")
     else:
         try:
             veri = veri_getir(ticker, periyot)
