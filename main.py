@@ -1,4 +1,7 @@
+import json
 import re
+import urllib.parse
+import urllib.request
 from typing import Tuple
 
 import altair as alt
@@ -11,13 +14,15 @@ st.set_page_config(page_title="Borsa Tarayıcı", page_icon="📊", layout="cent
 RSI_PERIYODU = 14
 RSI_ASIRI_ALIM = 70
 RSI_ASIRI_SATIM = 30
-TICKER_DESENI = re.compile(r"^[A-Z0-9.\-=]{1,15}$")
-HIZLI_SECIMLER = ["SHIB-USD", "BTC-USD", "ETH-USD", "THYAO.IS"]
+TICKER_DESENI = re.compile(r"^[A-Z0-9.]{1,15}$")
+HIZLI_SECIMLER = ["SHIBUSDT", "BTCUSDT", "ETHUSDT", "THYAO.IS"]
+BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
+BINANCE_GUN_LIMITI = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365}
 
 st.title("📊 Yapay Zeka Destekli Borsa Tarayıcı")
 st.caption(
-    "BIST hisseleri için sonuna .IS ekleyin (Örn: THYAO.IS). "
-    "Kriptolar için: BTC-USD, SHIB-USD"
+    "Kripto için Binance sembolü girin (Örn: SHIBUSDT, BTCUSDT). "
+    "BIST hisseleri için sonuna .IS ekleyin (Örn: THYAO.IS)."
 )
 
 
@@ -54,9 +59,43 @@ def sinyal_uret(rsi_degeri: float) -> Tuple[str, str]:
     return "⚪ [BEKLE]", "info"
 
 
+def _binance_klines_getir(sembol: str, gun_sayisi: int) -> pd.DataFrame:
+    """Binance genel (public) piyasa verisi uç noktası; API anahtarı gerekmez."""
+    parametreler = urllib.parse.urlencode(
+        {"symbol": sembol, "interval": "1d", "limit": gun_sayisi}
+    )
+    istek = urllib.request.Request(
+        f"{BINANCE_KLINES_URL}?{parametreler}", headers={"User-Agent": "Mozilla/5.0"}
+    )
+    with urllib.request.urlopen(istek, timeout=10) as yanit:
+        veri_json = json.loads(yanit.read().decode())
+
+    if isinstance(veri_json, dict):
+        raise ValueError(f"Binance hatası: {veri_json.get('msg', 'geçersiz sembol')}")
+    if not veri_json:
+        raise ValueError("Bu sembol için Binance'ta veri bulunamadı.")
+
+    kolonlar = [
+        "Open time", "Open", "High", "Low", "Close", "Volume",
+        "Close time", "Quote volume", "Trades", "Taker buy base",
+        "Taker buy quote", "Ignore",
+    ]
+    veri = pd.DataFrame(veri_json, columns=kolonlar)
+    veri["Date"] = pd.to_datetime(veri["Open time"], unit="ms")
+    veri = veri.set_index("Date")
+    for kolon in ["Open", "High", "Low", "Close", "Volume"]:
+        veri[kolon] = veri[kolon].astype(float)
+    return veri[["Open", "High", "Low", "Close", "Volume"]]
+
+
 @st.cache_data(ttl=300, show_spinner="Veri çekiliyor...")
 def veri_getir(ticker: str, periyot: str) -> pd.DataFrame:
-    veri = yf.Ticker(ticker).history(period=periyot, interval="1d", auto_adjust=True)
+    if ticker.endswith(".IS"):
+        veri = yf.Ticker(ticker).history(period=periyot, interval="1d", auto_adjust=True)
+    else:
+        gun_sayisi = BINANCE_GUN_LIMITI[periyot]
+        veri = _binance_klines_getir(ticker, gun_sayisi)
+
     if veri.empty:
         raise ValueError("Bu kod için veri bulunamadı. Kodun doğruluğunu kontrol edin.")
     return veri
@@ -95,7 +134,7 @@ def basit_rsi_backtest(veri: pd.DataFrame) -> dict:
 
 
 if "ticker_input" not in st.session_state:
-    st.session_state["ticker_input"] = "SHIB-USD"
+    st.session_state["ticker_input"] = "SHIBUSDT"
 
 st.write("**Hızlı Seçim:**")
 hizli_secim_kolonlari = st.columns(len(HIZLI_SECIMLER))
@@ -108,7 +147,7 @@ periyot = st.selectbox("Zaman Aralığı", ["1mo", "3mo", "6mo", "1y"], index=1)
 
 if st.button("ANALİZ ET", type="primary"):
     if not TICKER_DESENI.match(ticker):
-        st.error("Geçersiz varlık kodu. Sadece harf, rakam, nokta ve tire kullanın (Örn: SHIB-USD).")
+        st.error("Geçersiz varlık kodu. Sadece harf, rakam ve nokta kullanın (Örn: SHIBUSDT).")
     else:
         try:
             veri = veri_getir(ticker, periyot)
