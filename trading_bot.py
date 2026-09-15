@@ -30,6 +30,10 @@ Ortam değişkenleri (hepsi opsiyonel, varsayılanlar güvenli taraftadır):
                                             (varsayılan: POPULER_COINLER)
     TRADE_AMOUNT_USDT                      İşlem başına USDT miktarı (varsayılan 10)
     MAX_POSITIONS                          Eşzamanlı en fazla açık pozisyon (varsayılan 3)
+    TRADE_SERMAYE_ORANI                    Toplam bakiyenin en fazla ne kadarı
+                                            pozisyonlarda olabilir, 0-1 arası
+                                            (varsayılan 1.0 = sınırsız; 0.5 =
+                                            bakiyenin yarısı hep nakit kalır)
     STOP_LOSS_YUZDE                        Zarar-durdur yüzdesi (varsayılan 5)
     TAKE_PROFIT_YUZDE                      Kâr-al yüzdesi (varsayılan 8)
     MAX_GUNLUK_ZARAR_YUZDE                 Günlük zarar tavanı (varsayılan 5)
@@ -118,6 +122,9 @@ class BotAyarlari:
     )
     trade_amount_usdt: float = field(default_factory=lambda: _env_float("TRADE_AMOUNT_USDT", 10))
     max_positions: int = field(default_factory=lambda: _env_int("MAX_POSITIONS", 3))
+    sermaye_orani: float = field(
+        default_factory=lambda: min(max(_env_float("TRADE_SERMAYE_ORANI", 1.0), 0.0), 1.0)
+    )
     stop_loss_yuzde: float = field(default_factory=lambda: _env_float("STOP_LOSS_YUZDE", 5))
     take_profit_yuzde: float = field(default_factory=lambda: _env_float("TAKE_PROFIT_YUZDE", 8))
     max_gunluk_zarar_yuzde: float = field(
@@ -270,7 +277,26 @@ class TradingBot:
         pozisyon_degeri = sum(
             p["miktar"] * p["giris_fiyati"] for p in self.durum["pozisyonlar"].values()
         )
-        return self.durum["bakiye_usdt"] + pozisyon_degeri
+        if self.ayarlar.dry_run:
+            nakit = self.durum["bakiye_usdt"]
+        else:
+            try:
+                nakit = self.istemci.serbest_bakiye("USDT")
+            except Exception:
+                log.exception("Gerçek USDT bakiyesi alınamadı, son bilinen değer kullanılıyor.")
+                nakit = self.durum.get("bakiye_usdt", 0.0)
+        return nakit + pozisyon_degeri
+
+    def _yeni_pozisyon_sermaye_izni_var_mi(self) -> bool:
+        """Toplam sermayenin en fazla sermaye_orani kadarı pozisyonlarda olabilir."""
+        if self.ayarlar.sermaye_orani >= 1.0:
+            return True
+        toplam = self._toplam_deger_tahmini()
+        acik_pozisyon_degeri = sum(
+            p["miktar"] * p["giris_fiyati"] for p in self.durum["pozisyonlar"].values()
+        )
+        kullanilabilir_tavan = toplam * self.ayarlar.sermaye_orani
+        return acik_pozisyon_degeri + self.ayarlar.trade_amount_usdt <= kullanilabilir_tavan
 
     def _gunluk_zarar_asildi_mi(self) -> bool:
         baslangic = self.durum.get("gun_baslangic_bakiye", SANAL_BASLANGIC_BAKIYE)
@@ -379,6 +405,12 @@ class TradingBot:
             return
         if len(self.durum["pozisyonlar"]) >= self.ayarlar.max_positions:
             return
+        if not self._yeni_pozisyon_sermaye_izni_var_mi():
+            log.info(
+                "%s için sinyal var ama sermaye tavanı (%%%.0f) doldu, atlanıyor.",
+                sembol, self.ayarlar.sermaye_orani * 100,
+            )
+            return
         if guncel_rsi < RSI_ASIRI_SATIM and yukselis_trendi:
             self._pozisyon_ac(sembol, guncel_fiyat)
 
@@ -403,11 +435,12 @@ class TradingBot:
             emir_hedefi = "yok, sadece sanal bakiye simülasyonu"
         log.info(
             "Bot başlatıldı. Mod: %s | Emir hedefi: %s | Fiyat verisi: mainnet (public) | "
-            "Watchlist: %s | İşlem tutarı: %.2f USDT",
+            "Watchlist: %s | İşlem tutarı: %.2f USDT | Sermaye tavanı: %%%.0f",
             "CANLI" if self.ayarlar.canli_mod else "SANAL (dry-run)",
             emir_hedefi,
             ", ".join(self.ayarlar.watchlist),
             self.ayarlar.trade_amount_usdt,
+            self.ayarlar.sermaye_orani * 100,
         )
         while True:
             try:
