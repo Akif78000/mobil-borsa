@@ -1,0 +1,17 @@
+[Unit]
+Description=Kripto trading botu (trading_bot.py)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Kendi kullanıcı adın ve repo yoluna göre düzenle:
+User=CHANGE_ME_kullanici_adi
+WorkingDirectory=/home/CHANGE_ME_kullanici_adi/mobil-borsa
+EnvironmentFile=/home/CHANGE_ME_kullanici_adi/mobil-borsa/.env
+ExecStart=/home/CHANGE_ME_kullanici_adi/mobil-borsa/.venv/bin/python trading_bot.py
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

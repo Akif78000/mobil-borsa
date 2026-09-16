@@ -1,4 +1,6 @@
+import hmac
 import json
+import os
 import re
 from pathlib import Path
 
@@ -22,6 +24,34 @@ TICKER_DESENI = re.compile(r"^[A-Z0-9]{1,15}$")
 HIZLI_SECIMLER = ["SHIBUSDT", "BTCUSDT", "ETHUSDT", "DOGEUSDT"]
 BINANCE_GUN_LIMITI = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365}
 BOT_DURUM_DOSYASI = Path("trading_bot_state.json")
+
+
+def _erisim_kontrolu() -> bool:
+    """APP_SIFRE ortam değişkeni ayarlıysa paneli şifreyle korur.
+
+    Bot/panel genel bir sunucuda (VPS) yayınlanıp telefondan erişildiğinde
+    kimliksiz herkesin açık pozisyonları/bakiyeyi görmesini engeller.
+    Ortam değişkeni ayarlı değilse (yerel kullanım) hiçbir engel yoktur.
+    """
+    beklenen_sifre = os.environ.get("APP_SIFRE", "")
+    if not beklenen_sifre:
+        return True
+
+    if st.session_state.get("erisim_onaylandi"):
+        return True
+
+    st.title("🔒 Giriş")
+    girilen = st.text_input("Panel şifresi:", type="password")
+    if girilen and hmac.compare_digest(girilen, beklenen_sifre):
+        st.session_state["erisim_onaylandi"] = True
+        st.rerun()
+    elif girilen:
+        st.error("Yanlış şifre.")
+    return False
+
+
+if not _erisim_kontrolu():
+    st.stop()
 
 st.title("📊 Yapay Zeka Destekli Kripto Tarayıcı")
 st.caption("Binance sembolü girin (Örn: SHIBUSDT, BTCUSDT, ETHUSDT).")

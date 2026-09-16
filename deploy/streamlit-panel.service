@@ -1,0 +1,17 @@
+[Unit]
+Description=Kripto tarayıcı paneli (Streamlit)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Kendi kullanıcı adın ve repo yoluna göre düzenle:
+User=CHANGE_ME_kullanici_adi
+WorkingDirectory=/home/CHANGE_ME_kullanici_adi/mobil-borsa
+EnvironmentFile=/home/CHANGE_ME_kullanici_adi/mobil-borsa/.env
+ExecStart=/home/CHANGE_ME_kullanici_adi/mobil-borsa/.venv/bin/streamlit run main.py --server.address 0.0.0.0 --server.port 8501
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target
